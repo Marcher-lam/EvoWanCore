@@ -1,0 +1,47 @@
+[project]
+name = "evowancore-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "agent-core",
+    "agent-sdk",
+    "agent-explore",
+    "agent-evolve",
+    "agent-adapters",
+    "agent-devtools",
+    "examples",
+]
+
+[tool.uv.sources]
+agent-core = { workspace = true }
+agent-sdk = { workspace = true }
+agent-explore = { workspace = true }
+agent-evolve = { workspace = true }
+agent-adapters = { workspace = true }
+agent-devtools = { workspace = true }
+examples = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
+
+[tool.uv.workspace]
+members = ["agent-core", "agent-sdk", "agent-explore", "agent-evolve", "agent-adapters", "agent-devtools", "examples"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = [
+    "agent-core/tests",
+    "agent-sdk/tests",
+    "agent-explore/tests",
+    "agent-evolve/tests",
+    "agent-adapters/tests",
+    "agent-devtools/tests",
+    "examples/tests",
+]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["_bmad", ".claude", ".superpowers", "_bmad-output", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
