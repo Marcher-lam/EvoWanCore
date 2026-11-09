@@ -1,0 +1,16 @@
+{
+  "chat": {
+    "available": false,
+    "detail": "missing env EWC_BASE_URL / EWC_API_KEY / EWC_MODEL_CHAT"
+  },
+  "vlm": {
+    "available": false,
+    "detail": "missing env EWC_BASE_URL / EWC_API_KEY / EWC_MODEL_VLM"
+  },
+  "realtime": {
+    "available": false,
+    "detail": "missing env EWC_BASE_URL / EWC_API_KEY / EWC_MODEL_REALTIME"
+  },
+  "generated_at": "2026-11-09T07:27:39.339321+00:00",
+  "environment_observation": "ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic (GLM coding plan) present; EWC_* unset; real experiments (T9+/T22+) require user-provided bigmodel API key. Core tests use FakeModelAdapter, not blocked."
+}
