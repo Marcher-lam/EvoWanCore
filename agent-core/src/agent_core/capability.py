@@ -47,6 +47,15 @@ class InMemoryCapabilityRegistry:
 
     def __init__(self) -> None:
         self._by_id: dict[str, CapabilityDescriptor] = {}
+        self._bindings: dict[str, object] = {}
+
+    def bind(self, descriptor: CapabilityDescriptor, handler: object) -> None:
+        """描述符与可调用实现的绑定（CapabilityExecutor 消费）。"""
+        self.register(descriptor)
+        self._bindings[descriptor.id] = handler
+
+    def handler_for(self, capability_id: str):
+        return self._bindings.get(capability_id)
 
     def register(self, descriptor: CapabilityDescriptor) -> None:
         self._by_id[descriptor.id] = descriptor
