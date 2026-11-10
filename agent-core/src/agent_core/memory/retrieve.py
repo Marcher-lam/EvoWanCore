@@ -26,10 +26,15 @@ class MemoryRetriever(Protocol):
 
 
 class SimpleRetriever:
-    """确定性打分：VERIFIED/ACTIVE 强加权；environment_version 不匹配排除。"""
+    """确定性打分：VERIFIED/ACTIVE 强加权；environment_version 不匹配排除。
 
-    def __init__(self, store: MemoryStore) -> None:
+    V2 §6.4：CANDIDATE 默认排除（include_candidates=True 显式打开）——
+    未发布候选不得影响 solve，"带/不带候选"的对照由此可靠。
+    """
+
+    def __init__(self, store: MemoryStore, include_candidates: bool = False) -> None:
         self._store = store
+        self._include_candidates = include_candidates
 
     async def retrieve(self, scope: dict, task_context: dict, limit: int) -> list[MemoryRecord]:
         records: list[MemoryRecord] = []
@@ -41,6 +46,8 @@ class SimpleRetriever:
 
         # I3: 只有 ACTIVE 生命周期才可进入执行上下文（回滚/失效必须立刻生效）
         records = [r for r in records if r.lifecycle is LifecycleState.ACTIVE]
+        if not self._include_candidates:
+            records = [r for r in records if r.verification is not VerificationState.CANDIDATE]
 
         scored: list[tuple[float, int, MemoryRecord]] = []
         for idx, r in enumerate(records):

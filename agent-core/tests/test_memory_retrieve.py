@@ -36,8 +36,11 @@ async def _verified(store: SqliteMemoryStore, rec: MemoryRecord) -> MemoryRecord
 
 
 async def test_stale_environment_version_excluded(store: SqliteMemoryStore) -> None:
-    await store.put(_rule("新版本规则", environment_version="1.0"))
-    await store.put(_rule("旧版本规则", environment_version="0.9"))
+    # V2 §6.4 后默认排除 CANDIDATE——本测试聚焦环境版本过滤，记录取 VERIFIED
+    await store.put(_rule("新版本规则", environment_version="1.0",
+                          verification=VerificationState.VERIFIED))
+    await store.put(_rule("旧版本规则", environment_version="0.9",
+                          verification=VerificationState.VERIFIED))
 
     retriever = SimpleRetriever(store)
     got = await retriever.retrieve(
@@ -48,7 +51,8 @@ async def test_stale_environment_version_excluded(store: SqliteMemoryStore) -> N
     assert [r.content["statement"] for r in got] == ["新版本规则"]
 
 
-async def test_candidate_never_outranks_verified(store: SqliteMemoryStore) -> None:
+async def test_candidate_excluded_by_default(store: SqliteMemoryStore) -> None:
+    """V2 §6.4：CANDIDATE 默认不进执行上下文（关候选泄漏）；显式 include 才可见。"""
     verified = await _verified(store, _rule("无关键词命中但已验证"))
     candidate = _rule("导出参数包含关键词导出", verification=VerificationState.CANDIDATE)
     await store.put(candidate)
@@ -59,14 +63,17 @@ async def test_candidate_never_outranks_verified(store: SqliteMemoryStore) -> No
         task_context={"environment_version": "1.0", "keywords": ["导出"]},
         limit=10,
     )
-    assert got[0].id == verified.id
-    assert got[1].id == candidate.id
-    only_top = await retriever.retrieve(
+    ids = [r.id for r in got]
+    assert verified.id in ids
+    assert candidate.id not in ids, "CANDIDATE 默认必须排除——带/不带候选对照由此可靠"
+
+    with_cands = SimpleRetriever(store, include_candidates=True)
+    got2 = await with_cands.retrieve(
         scope={"namespaces": [NS_RULES]},
         task_context={"environment_version": "1.0", "keywords": ["导出"]},
-        limit=1,
+        limit=10,
     )
-    assert [r.id for r in only_top] == [verified.id]
+    assert candidate.id in [r.id for r in got2]
 
 
 def test_assembler_respects_budget() -> None:
