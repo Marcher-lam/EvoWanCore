@@ -141,3 +141,18 @@ async def test_reflector_prompt_carries_acceptance_feedback() -> None:
     prompt = " ".join(m["content"] for m in fake.recorded_requests[0].messages)
     assert "串栏污染" in prompt, "验收反馈须进入提示"
     assert "acceptance_feedback" in prompt or "ACCEPTANCE FEEDBACK" in prompt
+
+
+async def test_reflector_prompt_grounded_and_names_preprocessing() -> None:
+    """T23 迭代：提示须含 (a) 参数接地纪律（防编造因果）；(b) 扫描件读错时的
+    预处理杠杆提示（convert_format dpi）——阈值仍由评测门行为验证，非泄漏。"""
+    gw, fake = _gateway([InferResponse(text='{"proposals": []}')])
+    reflector = LLMReflector(gateway=gw, model_id="m-r")
+    await reflector(_Task(), _OutcomeWithTrace())
+    prompt = fake.recorded_requests[0].messages[0]["content"]
+    assert "trace" in prompt.lower() and "only parameters" in prompt, (
+        "须要求 claim 只引用 trace 中实际出现/缺省的参数"
+    )
+    assert "convert_format" in prompt and "scan" in prompt.lower(), (
+        "须提示扫描件读错时的预处理杠杆（convert_format dpi）"
+    )

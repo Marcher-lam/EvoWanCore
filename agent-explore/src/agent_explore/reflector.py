@@ -99,14 +99,19 @@ class LLMReflector:
                     "checks with failure details — this is the environment telling you "
                     "WHAT went wrong), infer reusable CAUSAL rules about "
                     "HOW TO CALL these tools — which parameter values decide success "
-                    "(e.g. dpi thresholds, region choice, format-specific preconditions) "
-                    "and why. Each rule MUST carry a structured claim: "
+                    "and why. GROUNDING DISCIPLINE: cite only parameters that appear "
+                    "(or are conspicuously defaulted) in the trace; never invent "
+                    "parameter stories for arguments you did not observe. When a scan "
+                    "document's fields were misread or its export lost pages, consider "
+                    "the preprocessing lever convert_format(doc_id, dpi) — the right "
+                    "threshold is yours to hypothesize; the evaluation gate will "
+                    "verify behaviorally. Each rule MUST carry a structured claim: "
                     '{"dimension": one of export|extract|convert|validate, "action": '
                     'one of the tool names above, "params": the decisive parameter '
-                    "values} — plus a human-readable statement. Ground every rule in "
-                    "the trace; generic process wisdom (e.g. 'verify afterwards', "
-                    "'check the format') is NOT acceptable. An empty proposals list "
-                    "is acceptable when the trace supports no causal rule."
+                    "values} — plus a human-readable statement. Generic process wisdom "
+                    "(e.g. 'verify afterwards', 'check the format') is NOT acceptable. "
+                    "An empty proposals list is acceptable when the trace supports no "
+                    "causal rule."
                 ),
             },
             {
