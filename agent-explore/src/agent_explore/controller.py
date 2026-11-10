@@ -85,6 +85,14 @@ def _diagnose(outcome: PracticeOutcome) -> dict:
     if outcome.status == "error":
         return {"type": "verification_gap", "note": outcome.error or "执行异常"}
     if outcome.status == "failed":
+        # T14 维度感知：extract/export 失败多为错误因果模型（双栏/丢页陷阱）→
+        # contrast 族针对性练习；其余失败保持缺前置技能诊断
+        dimension = outcome.task_id.split("_", 1)[0]
+        if dimension in ("extract", "export"):
+            return {
+                "type": "wrong_causal_model",
+                "note": f"{dimension} 维度练习未过：疑似错误因果模型",
+            }
         return {"type": "missing_prerequisite", "note": "练习未过验收"}
     if outcome.family == TaskFamily.TARGET_ATTEMPT.value:
         return {"type": "fragile_success", "note": "目标达成但可能脆弱"}

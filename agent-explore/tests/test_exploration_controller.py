@@ -21,7 +21,11 @@ from agent_core.runtime.eventlog import SqliteEventLog
 from agent_core.runtime.runtime import AgentRuntime
 from agent_core.runtime.statestore import SqliteStateStore
 from agent_core.task import TaskSpec
-from agent_explore.controller import ExplorationController, ExplorationPolicy
+from agent_explore.controller import (
+    ExplorationController,
+    ExplorationPolicy,
+    PracticeOutcome,
+)
 from agent_explore.curriculum import LLMCurriculumGenerator
 from agent_explore.curriculum_memory import DefaultAssembler
 from agent_explore.gaps import SqliteGapLedger
@@ -406,3 +410,19 @@ async def test_wave_parallelism_enforced(tmp_path: Path) -> None:
     report = await env.run(mode="broad", max_waves=1)
     assert report.tasks_executed == 4
     assert peak["max"] <= 2, f"并发峰值 {peak['max']} 超过 parallelism=2"
+
+
+def test_extract_failure_diagnoses_contrast() -> None:
+    """T14：extract/export 维度失败 → wrong_causal_model（→contrast 族）；其余 failed 保持。"""
+    from agent_explore.controller import _diagnose
+    from agent_explore.practice import DIAGNOSIS_FAMILY_MAP, DiagnosisType, TaskFamily
+
+    extract_fail = PracticeOutcome(task_id="extract_doc_3", status="failed")
+    export_fail = PracticeOutcome(task_id="export_doc_1", status="failed")
+    convert_fail = PracticeOutcome(task_id="convert_doc_1", status="failed")
+
+    assert _diagnose(extract_fail)["type"] == "wrong_causal_model"
+    assert _diagnose(export_fail)["type"] == "wrong_causal_model"
+    assert _diagnose(convert_fail)["type"] == "missing_prerequisite"
+    # 诊断映射到 contrast 任务族（双栏陷阱的针对性练习）
+    assert DIAGNOSIS_FAMILY_MAP[DiagnosisType.WRONG_CAUSAL_MODEL] is TaskFamily.CONTRAST
