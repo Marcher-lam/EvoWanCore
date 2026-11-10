@@ -223,6 +223,23 @@ class DocumentAgentApp:
             }
         ]
 
+    def _claim_target_dims(self, claim: dict) -> list[str]:
+        """T23：门验证场按 claim.action 定向——动作在哪些维度上是有区分度的陷阱。
+
+        convert_format 的规则在 convert 任务上无区分度（默认 dpi 已过），其效果
+        场在 export（图表丢页）/extract（低对比度读图）陷阱任务。
+        """
+        action = (claim or {}).get("action")
+        targeted = {
+            "convert_format": ["export", "extract"],
+            "extract_fields": ["extract"],
+            "export_document": ["export"],
+            "validate_form": ["validate"],
+        }
+        if action in targeted:
+            return targeted[action]
+        return []  # 由调用方退回来源维度
+
     def _trap_depth(self, task: dict) -> int:
         """T23：任务文档的陷阱深度——extract=低对比度页数；export=图表扫描页；
         convert=扫描件。门任务优先带陷阱的文档，规则才可被行为验证。"""
@@ -245,7 +262,8 @@ class DocumentAgentApp:
         practice_ids: set[str],
         heldout_ids: set[str],
         *,
-        dimension: str,
+        dimension: str = "",
+        dimensions: list[str] | None = None,
         exclude: bool = False,
         limit: int = 3,
     ) -> list[TaskSpec]:
@@ -255,10 +273,11 @@ class DocumentAgentApp:
         （回归场景，护旧能力）。
         """
         pool = [t for t in self._corpus.tasks if t["id"] in practice_ids]
+        want = set(dimensions) if dimensions else ({dimension} if dimension else set())
         if exclude:
-            selected = [t for t in pool if t["dimension"] != dimension][:limit]
+            selected = [t for t in pool if t["dimension"] not in want][:limit]
         else:
-            same_dim = [t for t in pool if t["dimension"] == dimension]
+            same_dim = [t for t in pool if t["dimension"] in want]
             # T23：优先陷阱文档（规则只有在能区分对错的题上才可被验证）
             selected = sorted(same_dim, key=lambda t: -self._trap_depth(t))[:limit]
         leaked = {t["id"] for t in selected} & set(heldout_ids)
@@ -306,9 +325,14 @@ class DocumentAgentApp:
         try:
             for r in pending:
                 dimension = r.source_refs[0].split("_", 1)[0] if r.source_refs else ""
-                mini_batch = self._gate_tasks(practice_ids, heldout_ids, dimension=dimension)
+                # T23：优先按 claim.action 定向验证场（convert 规则在 export/extract 陷阱上
+                # 才有区分度；LLM 自报 dimension 常错标为 convert）
+                target_dims = self._claim_target_dims(r.content.get("claim")) or [dimension]
+                mini_batch = self._gate_tasks(
+                    practice_ids, heldout_ids, dimensions=target_dims
+                )
                 regression = self._gate_tasks(
-                    practice_ids, heldout_ids, dimension=dimension, exclude=True, limit=2
+                    practice_ids, heldout_ids, dimensions=target_dims, exclude=True, limit=2
                 )
 
                 async def runner(task: TaskSpec, *, with_candidate: bool) -> float:

@@ -372,3 +372,19 @@ async def test_gate_prefers_trap_tasks(tmp_path: Path, corpus) -> None:
         for t in tasks
     )
     assert first_trap, "mini-batch 应含低对比度陷阱文档（可区分对错）"
+
+
+async def test_gate_targets_dims_by_claim_action(tmp_path: Path, corpus) -> None:
+    """T23 迭代 3：门任务维度按 claim.action 定向——convert_format 的规则在
+    export/extract 陷阱任务上验证（convert 默认参数已过、无区分度）。"""
+    hard_corpus = generate_corpus(seed=5, size=12, difficulty=0.8)
+    practice, _ = split_corpus(hard_corpus, practice_ratio=0.5)
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    app = build_app(
+        model_adapter=fake, db_path=tmp_path / "act.db", blob_dir=tmp_path / "ab",
+        corpus=hard_corpus, practice_part=practice,
+    )
+    dims = app._claim_target_dims({"action": "convert_format"})  # noqa: SLF001
+    assert set(dims) == {"export", "extract"}, "convert 规则的验证场在 export/extract 陷阱"
+    assert app._claim_target_dims({"action": "extract_fields"}) == ["extract"]  # noqa: SLF001
+    assert app._claim_target_dims({}) == []  # 无 claim → 调用方退回来源维度
