@@ -198,3 +198,23 @@ def test_perception_constraint_registered() -> None:
         "action": "convert_format", "param": "dpi", "op": ">=", "value": 150,
     }, "claim 键须与 convert 提升对比度的实际机制一致"
     assert all(c.get("claim") for c in HIDDEN_CONSTRAINTS), "既有约束均须带 claim 键"
+
+
+def test_image_extract_in_heldout() -> None:
+    """T22：extract 任务带 image_required 标记进语料；切分后练习/保留两侧都含。"""
+    corpus = generate_corpus(seed=11, size=12, difficulty=0.8, perceptual=True)
+    extracts = [t for t in corpus.tasks if t["dimension"] == "extract"]
+    assert extracts, "语料须含 extract 任务"
+    assert all(t.get("image_required") is True for t in extracts), (
+        "感知语料的 extract 任务必须全部 image-based（字段值只在渲染 PNG）"
+    )
+    text_corpus = generate_corpus(seed=11, size=12, difficulty=0.8)
+    assert all(
+        not t.get("image_required") for t in text_corpus.tasks
+    ), "文本语料（默认）不带视觉标记——B 检查点语义保持"
+    other = [t for t in corpus.tasks if t["dimension"] != "extract"]
+    assert all(not t.get("image_required") for t in other), "非 extract 任务不带视觉标记"
+
+    practice, heldout = split_corpus(corpus, 0.5)
+    assert any(t["dimension"] == "extract" for t in practice.tasks), "练习池含 image extract"
+    assert any(t["dimension"] == "extract" for t in heldout.tasks), "保留集含 image extract"

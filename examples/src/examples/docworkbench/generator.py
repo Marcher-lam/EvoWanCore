@@ -124,7 +124,9 @@ def _render_png(doc: dict) -> bytes:
     return buf.getvalue()
 
 
-def _task_for(dim: str, doc: dict, rng: random.Random, seq: int) -> tuple[dict, dict, Callable]:
+def _task_for(
+    dim: str, doc: dict, rng: random.Random, seq: int, *, perceptual: bool = False
+) -> tuple[dict, dict, Callable]:
     """(task, ground_truth, acceptance_script) —— 验收脚本是纯 Python 规则。"""
     tid = f"{dim}_{doc['id']}_{seq}"
     if dim == "export":
@@ -154,8 +156,11 @@ def _task_for(dim: str, doc: dict, rng: random.Random, seq: int) -> tuple[dict, 
                 "checks": [{"check": "fields_match_truth", "expect_n": len(expected),
                             "detail": "提交字段须与渲染真值一致（读图判分）"}],
             }
+        # T22：感知语料（v3 实验）中 extract 全量 image-based；文本语料保持 T18 判分
         task = {"id": tid, "dimension": dim, "doc_id": doc["id"],
                 "goal": "读图抽取全部字段并提交"}
+        if perceptual:
+            task["image_required"] = True
         truth = {"expected_result": {
             "fields": {f["name"]: f["value"] for f in doc["fields"]}, "source": "image"}}
         return task, truth, check_extract_submit
@@ -183,7 +188,9 @@ def _task_for(dim: str, doc: dict, rng: random.Random, seq: int) -> tuple[dict, 
     return task, truth, check_validate
 
 
-def generate_corpus(seed: int, size: int, difficulty: float) -> Corpus:
+def generate_corpus(
+    seed: int, size: int, difficulty: float, *, perceptual: bool = False
+) -> Corpus:
     rng = random.Random(seed)
     documents = [_make_doc(rng, i, difficulty) for i in range(size)]
 
@@ -193,7 +200,7 @@ def generate_corpus(seed: int, size: int, difficulty: float) -> Corpus:
     seq = 0
     for i, doc in enumerate(documents):
         dim = DIMS[i % len(DIMS)]  # 维度轮转保证均衡
-        task, truth, script = _task_for(dim, doc, rng, seq)
+        task, truth, script = _task_for(dim, doc, rng, seq, perceptual=perceptual)
         tasks.append(task)
         ground_truth[task["id"]] = truth
         scripts[task["id"]] = script

@@ -29,7 +29,8 @@ def run_experiment(config: str, out: str) -> None:
         budget_w=ExplorationBudget(max_actions=raw.get("max_actions", 4)),
         practice_ratio=raw.get("practice_ratio", 0.5),
         corpus_factory=lambda seed: generate_corpus(
-            seed, raw.get("size", 8), raw.get("difficulty", 0.4)
+            seed, raw.get("size", 8), raw.get("difficulty", 0.4),
+            perceptual=raw.get("perceptual", False),
         ),
         workdir=Path(out).parent / "workdirs",
         use_llm_reflector=raw.get("llm_reflector", False),
