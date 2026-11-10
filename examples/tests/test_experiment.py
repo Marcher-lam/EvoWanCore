@@ -218,3 +218,66 @@ def test_arm_stats_per_dimension_covers_all_seeds() -> None:
     # 每个维度应有 3 题分数（3 种子）：mean = 2/3，若只统计末位种子则恒为 0.0
     for dim in dims:
         assert arm.per_dimension[dim]["mean"] == pytest.approx(2 / 3), f"{dim} 应含 3 种子的分数"
+
+
+# ---------- T15：结构化声明审计 + reviewer ----------
+
+
+def test_audit_matches_structured_claim() -> None:
+    """结构化声明按 claim 机器判定（§6.3）：action 对但 params 不满足 → 错误。"""
+    from examples.docworkbench.audit import statement_matches_truth
+
+    good = {
+        "claim": {"dimension": "extract", "action": "extract_fields",
+                  "params": {"region": "left"}},
+        "statement": "双栏需 region=left",
+    }
+    assert statement_matches_truth(good) is True
+
+    # action 命中 convert 约束但 dpi=100 < 150/200 → 错误；正确文本不救（结构化为准）
+    bad_params = {
+        "claim": {"dimension": "convert", "action": "convert_format",
+                  "params": {"dpi": 100}},
+        "statement": "扫描件 convert_format 须 dpi>=150，否则丢字段",
+    }
+    assert statement_matches_truth(bad_params) is False
+
+    # 无 claim 的纯文本陈述 → 保持 V1 关键词匹配语义
+    assert statement_matches_truth("双栏版式必须传 region=left，否则串栏") is True
+
+
+async def test_audit_reviewer_overrides(tmp_path: Path) -> None:
+    """reviewer（gateway 强模型复核）可推翻确定性匹配——awaitable 兼容。"""
+    from agent_core.models import (
+        FakeModelAdapter,
+        InferResponse,
+        Modality,
+        ModelCapabilities,
+        ModelGateway,
+    )
+    from examples.docworkbench.audit import audit_promoted, make_gateway_reviewer
+
+    store = SqliteMemoryStore(tmp_path / "mem.db")
+    writer = DefaultMemoryWriter(store)
+    publisher = VersionedPublisher(store)
+    rec = await writer.commit(
+        await writer.propose(
+            kind=MemoryKind.RULE,
+            content={"statement": "双栏版式 extract_fields 必须传 region=left，否则串栏"},
+            applicability={"app": "workbench"},
+            evidence_refs=["evi"],
+        )
+    )
+    await publisher.publish(rec.id, verifier_report={})
+
+    fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-aud", inputs={Modality.TEXT}),
+        [InferResponse(text="NO — 该规则站不住")],  # 复核否定
+    )
+    gw = ModelGateway()
+    gw.register(fake)
+    reviewer = make_gateway_reviewer(gw, "m-aud")
+
+    report = await audit_promoted(store, reviewer=reviewer)
+    assert report.total == 1
+    assert report.error_count == 1, "gateway 复核否定应推翻确定性匹配"

@@ -13,24 +13,29 @@ HIDDEN_CONSTRAINTS: list[dict] = [
         "dimension": "export",
         "rule": "xlsx 导出对含图表扫描页的文档静默丢页；须先 convert_format(dpi=200)",
         "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 200},
     },
     {
         "id": "extract_two_column_region",
         "dimension": "extract",
         "rule": "双栏版式 extract_fields 必须显式传 region='left'，否则字段串栏",
         "naive_fails": True,
+        "claim": {"action": "extract_fields", "param": "region", "op": "==", "value": "left"},
     },
     {
         "id": "validate_tmp_prefix",
         "dimension": "validate",
         "rule": "invoice_no 以 TMP 开头时跳过校验和检查，恒为有效",
         "naive_fails": False,
+        "claim": {"action": "validate_form", "param": "skip_when_prefix",
+                  "op": "==", "value": "TMP"},
     },
     {
         "id": "convert_low_dpi_loses_fields",
         "dimension": "convert",
         "rule": "扫描件 convert_format(dpi<150) 会丢失低对比度字段",
         "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
     },
 ]
 

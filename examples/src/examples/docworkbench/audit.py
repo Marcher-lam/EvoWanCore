@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 from agent_core.memory.record import MemoryRecord, VerificationState
 from agent_core.memory.store import NS_RULES, MemoryStore
+from agent_core.models import InferRequest, Modality, ModelGateway
 from pydantic import BaseModel
+
+from examples.docworkbench.tools import HIDDEN_CONSTRAINTS
 
 # 每条真值约束的判定关键词（小写包含匹配，全部命中才算"陈述了该真值"）
 _TRUTH_KEYWORDS: dict[str, list[str]] = {
@@ -32,10 +36,75 @@ class AuditReport(BaseModel):
     regression_rate: float = 0.0  # 由演化轨道(T15)的 regression_violations 汇总，此处占位
 
 
-def statement_matches_truth(statement: str) -> bool:
-    """陈述是否与 HIDDEN_CONSTRAINTS 真值一致（发布门 + 审计共用）。"""
+def _claim_satisfies(claim: dict) -> bool:
+    """结构化声明对照约束表 claim 键（V2 §6.3 机器可判）。"""
+    action = claim.get("action")
+    params = claim.get("params") or {}
+    for constraint in HIDDEN_CONSTRAINTS:
+        spec = constraint.get("claim")
+        if not spec or spec["action"] != action:
+            continue
+        if spec["param"] not in params:
+            continue
+        value = params[spec["param"]]
+        expected = spec["value"]
+        if spec["op"] == ">=":
+            ok = value >= expected
+        elif spec["op"] == "==":
+            ok = value == expected
+        else:
+            ok = False
+        if ok:
+            return True
+    return False
+
+
+def statement_matches_truth(content: str | dict) -> bool:
+    """陈述/结构化声明是否与 HIDDEN_CONSTRAINTS 一致（审计共用）。
+
+    dict 且含 claim：以结构化声明为准（机器判定，正确文本不救错误参数）；
+    否则退回 statement 文本关键词匹配（V1 语义）。
+    """
+    if isinstance(content, dict):
+        claim = content.get("claim")
+        if isinstance(claim, dict) and claim:
+            return _claim_satisfies(claim)
+        return _text_matches(str(content.get("statement", "")))
+    return _text_matches(content)
+
+
+def _text_matches(statement: str) -> bool:
     s = statement.lower()
     return any(all(k in s for k in keywords) for keywords in _TRUTH_KEYWORDS.values())
+
+
+def make_gateway_reviewer(gateway: ModelGateway, model_id: str) -> Callable[[str], object]:
+    """强模型复核器（T15）：LLM 复核陈述是否站得住，可推翻确定性匹配。
+
+    返回 awaitable（audit_promoted 以 inspect.isawaitable 兼容同步 reviewer）。
+    """
+
+    async def reviewer(statement: str) -> bool:
+        adapter = gateway.route({"inputs": [Modality.TEXT]})
+        resp = await adapter.infer(
+            InferRequest(
+                model_id=adapter.capabilities().model_id,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an adversarial auditor for a document toolchain. "
+                            "Decide whether the statement correctly describes a real "
+                            "tool constraint. Answer strictly starting with YES or NO."
+                        ),
+                    },
+                    {"role": "user", "content": statement},
+                ],
+            )
+        )
+        return resp.text.strip().upper().startswith("YES")
+
+    return reviewer
 
 
 async def audit_promoted(
@@ -49,9 +118,12 @@ async def audit_promoted(
     wrong: list[str] = []
     for r in promoted:
         statement = str(r.content.get("statement", ""))
-        ok = statement_matches_truth(statement)
+        ok = statement_matches_truth(r.content)  # V2：兼容结构化声明（claim 机器判定）
         if ok and reviewer is not None:
-            ok = reviewer(statement)  # 强模型复核可推翻确定性匹配
+            verdict = reviewer(statement)  # 强模型复核可推翻确定性匹配
+            if inspect.isawaitable(verdict):
+                verdict = await verdict
+            ok = verdict
         if not ok:
             wrong.append(statement)
 
