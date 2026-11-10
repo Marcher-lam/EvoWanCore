@@ -22,11 +22,11 @@ V2 命题：**让系统学会它没学会的东西，并打开双向生态接口
 
 ### 目标
 
-**A 地基巩固**（~6 任务）
+**A 地基巩固**（~8 任务）
 1. 沙箱网络隔离（按技能声明放行；平台分支实现）
 2. runtime `enforce_budget` 接线（逐动作预算门，超限走 FAILED）
 3. resume 续跑剩余步骤（checkpoint 携带执行上下文，恢复后继续循环而非仅对账收口）
-4. 清 M1（环境版本参数化出 Core + 记忆盖戳 environment_version）、M8（公有 API 替代私有访问：runtime 事件读取、registry 重绑定、build_app 注入 verifier）、M10（演化态持久化到 SQLite + NS_RELEASES；空契约测试 fail）
+4. 清 M1/M8/M10（见 §9 M 清单）+ 顺手清同文件触碰的 **M2/M3/M7/M9**（V1 全部 12 项 minor 均为缓后未修；M5/M6/M11/M12 仍留 V3）
 
 **B 闭环智能化**（~10 任务，核心）
 5. **真 LLM reflector**：轨迹→候选经验的反思走 gateway；产出必须过**通用评测门禁**——`EvolutionController.evaluate`（小批次父子对比 + 回归检查）通过才 `publish`；工作台真值表**降级为审计工具**，不再承担发布 [已确认]
@@ -106,7 +106,19 @@ V2 命题：**让系统学会它没学会的东西，并打开双向生态接口
 - resume 续跑：checkpoint 增量保存 `context`（history/pending）；`resume` 重建 context 后继续主循环；已在途动作仍走 OUTCOME_UNKNOWN 对账
 - M1/M8/M10 按 V1 评审记录原文实施
 
-## 6. 实验与验收
+## 6. 实验与验收（builder check 后补答，逐条对应评审问题）
+
+**6.1 北极星操作定义（Q2）**：v3 感知化语料、**FakeVLM 作为读图模型**（T24 模式 [已确认]），**探索臂 extract 维度绝对值 ≥ 0.67** 为通过线（0.33 基线是文本通道的象征性参照，不做相对比较）；真 VLM 复跑 key 后补，可选、不阻塞 V2 验收。
+
+**6.2 预算口径（Q3）**：同预算 W 的计量改为**真实模型调用计数**（替换 V1 的 tokens=len(tasks) 占位）——探索臂的 reflector、课程规划、评测门的小批次父子运行与回归场景**全部计入**；重试臂计 solve 调用。为防探索臂饥饿：小批次 ≤ 3 题、回归场景 ≤ 2 题、单波任务数 ≤ 4。comparable 判定基于同一调用计数口径。
+
+**6.3 红线判定机制（Q4）**：reflector 输出契约升级为**结构化约束声明 + 自然语言陈述**双层——`{"dimension", "action", "params"(如 dpi/region/contrast), "statement"}`；审计按结构化声明对照真值表（机器可判），statement 供人读。v3 验收运行**开启 gateway reviewer**（DeepSeek 复核自身反思，方向性标准下可接受，局限性记录于报告）。
+
+**6.4 评测门规则（Q5）**：小批次/回归任务只允许**练习池任务或新生成的同难度种子任务**，保留集任务**绝对禁止**进入任何门的评测（保住"unseen 保留集"主张）；`improved` 保持严格大于（保守 = 宁可不学，与红线一致）；**关闭候选泄漏**：`SimpleRetriever` 默认排除 CANDIDATE 记录（V1 允许低分召回的语义随通用评测门上线而收紧，相应更新既有测试）——"带/不带候选"的对照由此可靠。
+
+**6.5 B 块独立里程碑（Q7）**：感知化语料落地前，先在**当前文本语料**跑一次 B 检查点实验（reflector+门禁+gap 课程的中间验证，~10 分钟）——先去风险再上感知语料；最终 v3 为感知化主实验。
+
+**6.6 MCP 参考验收（Q6，已验证）**：本环境 Node v22 存在但 npm 网络安装失败（ECONNRESET）——参考验收改用**官方 Python SDK 自建最小 stdio filesystem server**（进测试 fixtures）；官方 Node server 在网络允许时作为可选冒烟。
 
 1. **主实验 v3**（B 完成后）：难度 0.8 感知化语料、3+ 新种子、extract 维度提升 ≥ 0.67 为通过线；错误晋级率 = 0 红线
 2. **门禁回归**：reflector 产出错误陈述时评测门拒绝（RED→GREEN 测试）
@@ -123,8 +135,28 @@ V2 命题：**让系统学会它没学会的东西，并打开双向生态接口
 | # | 裁量 | 默认 |
 |---|---|---|
 | 1 | MCP SDK 引入位置 | agent-adapters，仅此包依赖 mcp |
-| 2 | 参考验收的 MCP server | 官方 filesystem server（stdio） |
+| 2 | 参考验收的 MCP server | Python SDK 自建最小 stdio filesystem server（npm 网络不可用）；Node 官方 server 可选 |
 | 3 | 网络隔离平台分支降级策略 | 不支持平台显式报错，不静默跳过 |
 | 4 | 感知陷阱阈值 | contrast < 0.5 不可靠，convert 后 → 1.0 |
 | 5 | VLM 路由 | inputs={IMAGE} 显式声明；infer 通道批处理（非 realtime） |
 | 6 | server 暴露白名单 | 默认只读能力；白名单配置可扩 |
+
+---
+
+## 9. V1 评审 Minor 清单（V2 计划的自包含依据）
+
+V1 最终评审 12 项 minor 全部缓后未修；V2 清 M1/M2/M3/M7/M8/M9/M10，留 M5/M6/M11/M12 给 V3：
+
+| # | 内容 | V2 处置 |
+|---|---|---|
+| M1 | "workbench-1" 硬编码于 Core runtime；environment_version 未盖戳记忆 | ✅ A 块 |
+| M2 | capability.discover 用 `is not` 身份比较（字符串查询返回空） | ✅ A 块 |
+| M3 | trace_lineage 空 observation_refs 生成非法 SQL | ✅ A 块 |
+| M5 | realtime 满队列非音频静默丢弃；读循环无强引用 | V3 |
+| M6 | resume=对账收口不续跑（RECONCILIATION 未作等待态） | ✅ A 块#3（语义补全覆盖） |
+| M7 | cancel 与 verify 窄竞态窗口 | ✅ A 块 |
+| M8 | 跨层私有访问（controller._log / registry._bindings / 验收测试戳 _verifier） | ✅ A 块（公有 API） |
+| M9 | parallelism 未强制；BRS token 占位计数；DRS 合成初始 outcome | ✅ A 块（token 占位由 §6.2 真实计数覆盖） |
+| M10 | 演化 controller 内存态、manifest 未持久化、空契约测试 vacuous pass | ✅ A 块（持久化 + 空契约 fail） |
+| M11 | 异步路径阻塞 fs；cancel 字典缓慢泄漏 | V3 |
+| M12 | e2e 命名 script-model 澄清注释；CLI 默认 0/0 提示 | V3 |
