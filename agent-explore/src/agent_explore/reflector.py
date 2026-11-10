@@ -43,6 +43,7 @@ class _TaskLike(Protocol):
 class _OutcomeLike(Protocol):
     status: str
     evidence_refs: list[str]
+    actions: list[dict]
 
 
 async def _infer_validated(gateway: ModelGateway, messages: list[dict], schema_hint: dict,
@@ -89,13 +90,20 @@ class LLMReflector:
             {
                 "role": "system",
                 "content": (
-                    "You are the experience reflector for a document-workbench agent. "
-                    "Given one practice outcome, propose reusable experience rules. Each "
-                    "rule MUST carry a structured claim: "
-                    '{"dimension": one of export|extract|convert|validate, "action": tool '
-                    'name, "params": dict of the decisive parameters} — plus a human-'
-                    "readable statement. Only propose what this outcome supports; an "
-                    "empty proposals list is acceptable."
+                    "You are the experience reflector for a document-workbench agent "
+                    "whose ONLY tools are: parse_document(doc_id); extract_fields"
+                    "(doc_id, region); convert_format(doc_id, dpi); export_document"
+                    "(doc_id, format); validate_form(doc_id). From the practice "
+                    "outcome and its ACTION TRACE, infer reusable CAUSAL rules about "
+                    "HOW TO CALL these tools — which parameter values decide success "
+                    "(e.g. dpi thresholds, region choice, format-specific preconditions) "
+                    "and why. Each rule MUST carry a structured claim: "
+                    '{"dimension": one of export|extract|convert|validate, "action": '
+                    'one of the tool names above, "params": the decisive parameter '
+                    "values} — plus a human-readable statement. Ground every rule in "
+                    "the trace; generic process wisdom (e.g. 'verify afterwards', "
+                    "'check the format') is NOT acceptable. An empty proposals list "
+                    "is acceptable when the trace supports no causal rule."
                 ),
             },
             {
@@ -111,6 +119,7 @@ class LLMReflector:
                             "status": outcome.status,
                             "evidence_ref_count": len(outcome.evidence_refs),
                         },
+                        "action_trace": list(getattr(outcome, "actions", []) or []),
                     },
                     ensure_ascii=False,
                 ),

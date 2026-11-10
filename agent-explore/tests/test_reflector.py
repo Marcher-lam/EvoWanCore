@@ -82,3 +82,39 @@ async def test_reflector_malformed_returns_empty() -> None:
     proposals = await reflector(_Task(), _Outcome())
     assert proposals == []
     assert len(fake.recorded_requests) == 2, "畸形应触发一次带错误提示的重试"
+
+
+class _OutcomeWithTrace:
+    task_id = "convert_doc_2"
+    title = "转换练习"
+    status = "passed"
+    evidence_refs = ["e1"]
+    actions = [
+        {"capability_id": "convert_format", "arguments": {"doc_id": "doc_2", "dpi": 200},
+         "status": "succeeded"},
+    ]
+
+
+async def test_reflector_prompt_carries_action_trace() -> None:
+    """T16 诊断迭代：提示须含工具语义 + 动作轨迹（LLM 才能推断因果参数约束）。"""
+    import json
+
+    llm_output = {
+        "proposals": [
+            {
+                "statement": "扫描件转换须 dpi>=150 否则丢字段",
+                "claim": {"dimension": "convert", "action": "convert_format",
+                          "params": {"dpi": 200}},
+                "applicability": {"app": "workbench"},
+            }
+        ]
+    }
+    gw, fake = _gateway([InferResponse(text=json.dumps(llm_output))])
+    reflector = LLMReflector(gateway=gw, model_id="m-r")
+    proposals = await reflector(_Task(), _OutcomeWithTrace())
+    assert proposals and proposals[0]["content"]["claim"]["params"] == {"dpi": 200}
+    prompt = " ".join(m["content"] for m in fake.recorded_requests[0].messages)
+    assert "convert_format" in prompt, "提示须含工具语义"
+    assert "dpi" in prompt and '"status": "succeeded"' in prompt.replace("'", '"'), (
+        "提示须含动作轨迹（LLM 推断因果的依据）"
+    )

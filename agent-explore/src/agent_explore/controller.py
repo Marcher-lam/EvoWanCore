@@ -48,6 +48,7 @@ class PracticeOutcome(BaseModel):
     family: str = "variant"
     status: Literal["passed", "failed", "error"] = "failed"
     evidence_refs: list[str] = []
+    actions: list[dict] = []  # 动作轨迹（capability_id/arguments/status）——reflector 因果依据
     error: dict | None = None
 
 
@@ -268,11 +269,24 @@ class ExplorationController:
         runtime: AgentRuntime = app_context["runtime"]
         agent: AgentSpec = app_context["agent"]
         run = await runtime.submit(spec, agent)
-        evidence_refs = [
-            e.payload.get("evidence_refs", [])
-            async for e in runtime.events(run.id)
-            if e.type == "ActionSucceeded"
-        ]
+        evidence_refs: list[list[str]] = []
+        proposed: dict[str, dict] = {}
+        actions: list[dict] = []
+        async for e in runtime.events(run.id):
+            if e.type == "ActionProposed":
+                proposed[e.subject_id] = {
+                    "capability_id": e.payload.get("capability_id"),
+                    "arguments": e.payload.get("arguments", {}),
+                }
+            elif e.type in ("ActionSucceeded", "ActionFailed"):
+                actions.append(
+                    {
+                        **proposed.get(e.subject_id, {}),
+                        "status": "succeeded" if e.type == "ActionSucceeded" else "failed",
+                    }
+                )
+            if e.type == "ActionSucceeded":
+                evidence_refs.append(e.payload.get("evidence_refs", []))
         flat = [ref for group in evidence_refs for ref in group]
         status = "passed" if run.state.value == "succeeded" else "failed"
         return PracticeOutcome(
@@ -281,6 +295,7 @@ class ExplorationController:
             family=task.family.value,
             status=status,
             evidence_refs=flat,
+            actions=actions,
         )
 
     # ---------- 记忆合并（BRS 波后按序 / DRS 每步） ----------

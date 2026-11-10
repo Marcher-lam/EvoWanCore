@@ -426,3 +426,35 @@ def test_extract_failure_diagnoses_contrast() -> None:
     assert _diagnose(convert_fail)["type"] == "missing_prerequisite"
     # 诊断映射到 contrast 任务族（双栏陷阱的针对性练习）
     assert DIAGNOSIS_FAMILY_MAP[DiagnosisType.WRONG_CAUSAL_MODEL] is TaskFamily.CONTRAST
+
+
+async def test_practice_outcome_carries_action_trace(tmp_path: Path) -> None:
+    """T16 诊断迭代：PracticeOutcome 携带动作轨迹（reflector 推断因果的依据）。"""
+    from agent_core.capability import CapabilityDescriptor, CapabilityType
+
+    async def noop(args):  # noqa: ARG001
+        return {"ok": True}
+
+    tasks = [_task_json("variant", "t1")]
+    plan = _wave_plan_json("x", tasks)
+    env = Env(tmp_path, responses=[InferResponse(text=plan), InferResponse(text="done")])
+    env.registry.bind(
+        CapabilityDescriptor(
+            id="noop_tool", type=CapabilityType.TOOL, name="空操作",
+            input_schema={}, side_effect_level="read", auth_scope=[],
+        ),
+        noop,
+    )
+    from agent_core.models import InferResponse as IR
+
+    env.fake._responses.insert(
+        1, IR(tool_calls=[{"id": "c1", "name": "noop_tool", "arguments": {"x": 1}}])
+    )
+    seen: list = []
+    env.reflector = lambda task, outcome: (seen.append(outcome), [])[1]
+    await env.run(mode="broad", max_waves=1)
+    assert seen, "reflector 应收到 outcome"
+    trace = seen[0].actions
+    assert trace and trace[0]["capability_id"] == "noop_tool"
+    assert trace[0]["arguments"] == {"x": 1}
+    assert trace[0]["status"] in ("succeeded", "failed")
