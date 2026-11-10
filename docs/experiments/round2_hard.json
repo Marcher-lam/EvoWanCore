@@ -1,0 +1,98 @@
+{
+  "seeds": [
+    21,
+    22,
+    23
+  ],
+  "arms": {
+    "explore": {
+      "name": "explore",
+      "scores": [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 0.75,
+      "variance": 0.1875,
+      "per_dimension": {
+        "export": {
+          "mean": 0.6666666666666666,
+          "variance": 0.2222222222222222
+        },
+        "extract": {
+          "mean": 0.3333333333333333,
+          "variance": 0.2222222222222222
+        },
+        "convert": {
+          "mean": 1.0,
+          "variance": 0.0
+        },
+        "validate": {
+          "mean": 1.0,
+          "variance": 0.0
+        }
+      },
+      "budget_spent": {
+        "actions": 12,
+        "tokens": 12,
+        "cost": 0.0,
+        "wall_clock_s": 0.0
+      },
+      "attempts": 12
+    },
+    "retry": {
+      "name": "retry",
+      "scores": [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean": 0.5833333333333334,
+      "variance": 0.24305555555555555,
+      "per_dimension": {
+        "export": {
+          "mean": 0.0,
+          "variance": 0.0
+        },
+        "extract": {
+          "mean": 0.3333333333333333,
+          "variance": 0.2222222222222222
+        },
+        "convert": {
+          "mean": 1.0,
+          "variance": 0.0
+        },
+        "validate": {
+          "mean": 1.0,
+          "variance": 0.0
+        }
+      },
+      "budget_spent": {
+        "actions": 12,
+        "tokens": 12,
+        "cost": 0.0,
+        "wall_clock_s": 0.0
+      },
+      "attempts": 12
+    }
+  },
+  "comparable": true
+}
