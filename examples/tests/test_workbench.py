@@ -105,3 +105,39 @@ def test_random_helper_isolated() -> None:
     before = random.getstate()
     generate_corpus(seed=42, size=4, difficulty=0.3)
     assert random.getstate() == before
+
+
+# ---------- T17：页级对比度 + 渲染增强 ----------
+
+
+def test_pages_have_contrast() -> None:
+    """难度 0.8 的扫描文档存在 contrast<0.5 页（感知陷阱载体）；所有页带 contrast。"""
+    corpus = generate_corpus(seed=5, size=12, difficulty=0.8)
+    scan_docs = [d for d in corpus.documents if d["kind"] == "scan"]
+    assert scan_docs, "高难语料应含扫描件"
+    assert any(
+        p.get("contrast", 1.0) < 0.5 for d in scan_docs for p in d["pages"]
+    ), "扫描文档应存在低对比度页（contrast<0.5）"
+    for doc in corpus.documents:
+        for page in doc["pages"]:
+            assert isinstance(page.get("contrast"), float), "每页必须带 contrast"
+            assert 0.0 < page["contrast"] <= 1.0
+
+
+def test_render_enhanced_deterministic() -> None:
+    """增强渲染：同种子逐字节确定；对比度必须影响渲染（浅色文字=感知差异载体）。"""
+    from examples.docworkbench.generator import _render_png
+
+    a = generate_corpus(seed=9, size=8, difficulty=0.8)
+    b = generate_corpus(seed=9, size=8, difficulty=0.8)
+    assert a.assets == b.assets, "渲染必须同种子逐字节确定"
+
+    doc = next(d for d in a.documents if d["kind"] == "scan")
+    lifted = _render_png(
+        {
+            **doc,
+            "pages": [{**p, "contrast": 1.0} for p in doc["pages"]],
+            "fields": [{**f, "contrast": 1.0} for f in doc["fields"]],
+        }
+    )
+    assert lifted != a.assets[doc["id"]], "对比度必须影响渲染输出"

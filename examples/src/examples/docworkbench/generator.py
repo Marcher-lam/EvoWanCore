@@ -38,10 +38,24 @@ def _make_doc(rng: random.Random, i: int, difficulty: float) -> dict:
     if difficulty > 0.2:
         fields.append({"name": "invoice_no", "value": f"TMP-{rng.randrange(1000, 9999)}0"})
 
-    pages = [{"layout": layout, "is_chart_scan": False} for _ in range(rng.randint(1, 3))]
+    pages = []
+    n_pages = rng.randint(1, 3)
+    for pi in range(n_pages):
+        # T17 页级对比度：高难扫描件首页结构性低对比（<0.5，感知陷阱载体）；
+        # 其余页与原生文档从参数化分布取值（同种子确定）
+        if kind == "scan" and hard and pi == 0:
+            contrast = round(rng.uniform(0.25, 0.48), 2)
+        elif kind == "scan":
+            contrast = round(rng.uniform(0.5, 0.95), 2)
+        else:
+            contrast = 1.0
+        pages.append({"layout": layout, "is_chart_scan": False, "contrast": contrast})
     has_chart = rng.random() < (0.9 if hard else 0.5)
     if has_chart:
-        pages.append({"layout": "chart", "is_chart_scan": True})
+        pages.append(
+            {"layout": "chart", "is_chart_scan": True, "contrast": 1.0 if kind == "native"
+             else round(rng.uniform(0.5, 0.95), 2)}
+        )
 
     return {
         "id": f"doc_{i}",
@@ -54,13 +68,56 @@ def _make_doc(rng: random.Random, i: int, difficulty: float) -> dict:
     }
 
 
+def _text_fill(contrast: float) -> tuple[int, int, int]:
+    """对比度 → 文字灰度：低对比度页文字浅（感知差异载体），高对比度近黑。"""
+    v = int(round(255 * (1.0 - min(max(contrast, 0.0), 1.0) * 0.92)))
+    return (v, v, v)
+
+
 def _render_png(doc: dict) -> bytes:
-    img = Image.new("RGB", (240, 120), "white")
-    draw = ImageDraw.Draw(img)
-    draw.text((8, 6), f"{doc['id']} [{doc['layout']}/{doc['kind']}]", fill="black")
-    for i, f in enumerate(doc["fields"][:6]):
-        draw.text((8, 24 + i * 14), f"{f['name']}={f['value']}", fill="black")
+    """增强渲染（T17）：逐页分块——版式（双栏/表单/报表/图表）+ 网格线 + 扫描噪点，
+    文字灰度按页 contrast 调整；噪点用 doc_id 派生 rng，同种子逐字节确定。"""
     import io
+    import random as _random
+
+    page_h, width = 110, 260
+    img = Image.new("RGB", (width, page_h * len(doc["pages"]) + 16), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((6, 2), f"{doc['id']} [{doc['layout']}/{doc['kind']}]", fill="black")
+
+    y = 16
+    for pi, page in enumerate(doc["pages"]):
+        contrast = float(page.get("contrast", 1.0))
+        fill = _text_fill(contrast)
+        layout = page.get("layout", "report")
+        # 页框 + 网格结构线（表格网格是结构信号）
+        draw.rectangle([4, y, width - 4, y + page_h - 6], outline="black")
+        if layout == "two_column":
+            draw.line([width // 2, y, width // 2, y + page_h - 6], fill="black")
+        elif layout == "form":
+            for row in range(1, 4):
+                draw.line([8, y + row * 24, width - 8, y + row * 24], fill="black")
+        elif layout == "chart":
+            draw.rectangle([20, y + 20, width - 20, y + page_h - 26], outline="black")
+
+        # 字段值按版式落位（双栏各半）；对比度决定可读性
+        cols = [12, width // 2 + 8] if layout == "two_column" else [12]
+        for i, f in enumerate(doc["fields"][:6]):
+            cx = cols[i % len(cols)]
+            cy = y + 10 + (i // len(cols)) * 16
+            draw.text((cx, cy), f"{f['name']}={f['value']}", fill=fill)
+        draw.text((width - 70, y + page_h - 18), f"p{pi} c={contrast:.2f}",
+                  fill=_text_fill(min(contrast + 0.2, 1.0)))
+
+        # 扫描噪点：确定性（doc/页派生种子），低对比度页更密
+        if doc["kind"] == "scan":
+            noise_rng = _random.Random(f"{doc['id']}-p{pi}")
+            n_dots = int(40 * (1.2 - contrast))
+            for _ in range(n_dots):
+                nx = noise_rng.randrange(6, width - 6)
+                ny = noise_rng.randrange(y + 2, y + page_h - 8)
+                draw.point((nx, ny), fill=(160, 160, 160))
+        y += page_h
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
