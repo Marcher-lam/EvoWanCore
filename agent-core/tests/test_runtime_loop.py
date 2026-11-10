@@ -386,3 +386,104 @@ async def test_cancel_during_verify_yields_cancelled(tmp_path: Path) -> None:
     release_verify.set()
     final = await verify_task
     assert final.state.value == "cancelled"
+
+
+# ---------- T6：resume 续跑剩余步骤 ----------
+
+
+async def test_resume_continues_remaining_steps(tmp_path: Path) -> None:
+    """两动作任务：第一动作完成后崩溃 → resume 重建 context 续跑主循环，
+    第二动作执行且两个动作各只派发一次。"""
+    gate = asyncio.Event()
+
+    class _GatedSecondInfer:
+        """第二次 infer 挂起：精确制造"第一动作完成、第二动作提议前"的崩溃窗口。"""
+
+        def __init__(self, fake: FakeModelAdapter) -> None:
+            self._fake = fake
+            self.calls = 0
+
+        def capabilities(self):
+            return self._fake.capabilities()
+
+        async def infer(self, request):
+            self.calls += 1
+            if self.calls == 2:
+                await gate.wait()
+            return await self._fake.infer(request)
+
+    async def handler(args):
+        return {"step": args.get("step", 0)}
+
+    env1 = Env(
+        tmp_path,
+        responses=[
+            InferResponse(
+                tool_calls=[{"id": "c1", "name": "extract_fields", "arguments": {"step": 1}}]
+            ),
+        ],
+        handler=handler,
+    )
+    gated_gw = ModelGateway()
+    gated_gw.register(_GatedSecondInfer(env1.fake))
+    rt1 = AgentRuntime(
+        gateway=gated_gw,
+        registry=env1.registry,
+        policy_engine=DefaultPolicyEngine(),
+        event_log=env1.event_log,
+        state_store=env1.state_store,
+        evidence_store=env1.evidence,
+        verifier=StubVerifier(passed=True),
+    )
+    submit_task = asyncio.create_task(rt1.submit(_spec(), env1.agent()))
+
+    # 等第一动作完成且检查点落盘（history 1 条、pending 清空、含 task 子集）
+    run_id = None
+    checkpoint = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        async for e in env1.event_log.iter_events():
+            if e.type == "ActionSucceeded":
+                run_id = e.correlation_id
+        if run_id:
+            cp = await env1.state_store.load_latest_checkpoint(run_id)
+            if cp and len(cp.get("history", [])) >= 1 and not cp.get("pending"):
+                checkpoint = cp
+                break
+    assert checkpoint, "第一动作完成后应有检查点（history≥1，pending 空）"
+    assert checkpoint.get("task", {}).get("id") == "spec_extract"  # context 子集持久化
+
+    submit_task.cancel()  # 崩溃：挂在第二次 infer（第二动作尚未提议）
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+    gate.set()
+
+    # 重启：新 runtime 实例共享持久化；模型脚本给第二动作提案 + 收尾
+    env2 = Env(
+        tmp_path,
+        responses=[
+            InferResponse(
+                tool_calls=[{"id": "c2", "name": "extract_fields", "arguments": {"step": 2}}]
+            ),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    rt2 = AgentRuntime(
+        gateway=env2.gateway,
+        registry=env2.registry,
+        policy_engine=DefaultPolicyEngine(),
+        event_log=env1.event_log,
+        state_store=env1.state_store,
+        evidence_store=env1.evidence,
+        verifier=StubVerifier(passed=True),
+    )
+    run = await rt2.resume(run_id)
+
+    assert run.state.value == "succeeded"
+    events = [e async for e in env1.event_log.iter_events(run_id)]
+    dispatched = [e for e in events if e.type == "ActionDispatched"]
+    succeeded = [e for e in events if e.type == "ActionSucceeded"]
+    assert len(dispatched) == 2, "两动作各只派发一次（崩溃不重发，恢复续跑第二动作）"
+    assert len(succeeded) == 2
+    assert not any(e.type == "ActionOutcomeUnknown" for e in events)  # 崩溃时无在途动作

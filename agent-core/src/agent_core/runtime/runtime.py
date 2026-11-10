@@ -107,6 +107,34 @@ class AgentRuntime:
 
     # ---------- 提交与主循环 ----------
 
+    async def _assemble_memory(self, task: TaskSpec) -> str:
+        if self._memory_retriever is None:
+            return ""
+        records = await self._memory_retriever.retrieve(
+            scope={"namespaces": ["rules"]},
+            task_context={
+                "environment_version": self._environment_version,
+                "keywords": [task.kind.split(":")[-1], str(task.goal.get("what", ""))],
+            },
+            limit=8,
+        )
+        if self._context_assembler is not None:
+            return self._context_assembler.assemble(records, self._memory_token_budget)
+        return "\n".join(str(r.content) for r in records)
+
+    async def _save_checkpoint(
+        self, run: RunHandle, context: dict, extra: dict | None = None
+    ) -> None:
+        """检查点持久化 context 子集（task spec + pending + history）——resume 重建依据。"""
+        state: dict = {
+            "task": context["task"].model_dump(),
+            "pending": list(context["pending"]),
+            "history": list(context["history"]),
+        }
+        if extra:
+            state.update(extra)
+        await self._store.save_checkpoint(run.id, state)
+
     async def submit(self, task: TaskSpec, agent: AgentSpec) -> RunHandle:
         task_handle = TaskHandle(id=f"task_{task.id}", spec_id=task.id, assigned_agent=agent.id)
         await self._store.save_task(task_handle)
@@ -121,29 +149,18 @@ class AgentRuntime:
         run = run_transition(run, RunState.RUNNING)
         await self._save(run, old, run.state)
 
-        memory_text = ""
-        if self._memory_retriever is not None:
-            records = await self._memory_retriever.retrieve(
-                scope={"namespaces": ["rules"]},
-                task_context={
-                    "environment_version": self._environment_version,
-                    "keywords": [task.kind.split(":")[-1], str(task.goal.get("what", ""))],
-                },
-                limit=8,
-            )
-            if self._context_assembler is not None:
-                memory_text = self._context_assembler.assemble(
-                    records, self._memory_token_budget
-                )
-            else:
-                memory_text = "\n".join(str(r.content) for r in records)
         context: dict = {
             "task": task,
             "capability_schemas": self._capability_schemas(),
             "history": [],
-            "memory": memory_text,
+            "memory": await self._assemble_memory(task),
             "pending": [],
         }
+        await self._save_checkpoint(run, context)
+        await self._execution_loop(run, agent, context)
+        return await self._finish_run(run)
+
+    async def _execution_loop(self, run: RunHandle, agent: AgentSpec, context: dict) -> None:
         policy = self._execution_policy or ModelLoopPolicy(gateway=self._gateway, agent=agent)
 
         for _step in range(self._max_steps):
@@ -166,6 +183,7 @@ class AgentRuntime:
             if stop or policy.should_yield(run, context):
                 break
 
+    async def _finish_run(self, run: RunHandle) -> RunHandle:
         if self._budget_meter is not None and self._budget_meter.exhausted:
             return await self._fail_budget_exhausted(run)
         return await self.verify_and_finish(run.id)
@@ -226,17 +244,12 @@ class AgentRuntime:
         )
         # 派发即检查点：崩溃后恢复时此动作不得重复派发
         context["pending"].append(action.id)
-        await self._store.save_checkpoint(
-            run.id, {"step_pending": action.id, "pending": list(context["pending"]),
-                     "history": list(context["history"])}
-        )
+        await self._save_checkpoint(run, context, {"step_pending": action.id})
 
         result = await self._dispatch_with_cancel(run, action)
         if result is None:  # 取消：回执丢失语义
             context["pending"].remove(action.id)
-            await self._store.save_checkpoint(
-                run.id, {"pending": list(context["pending"]), "history": list(context["history"])}
-            )
+            await self._save_checkpoint(run, context)
             return "cancelled"
 
         context["pending"].remove(action.id)
@@ -275,9 +288,7 @@ class AgentRuntime:
             {"capability_id": action.capability_id, "arguments": action.arguments,
              "status": result.status.value}
         )
-        await self._store.save_checkpoint(
-            run.id, {"pending": list(context["pending"]), "history": list(context["history"])}
-        )
+        await self._save_checkpoint(run, context)
         return "done"
 
     async def _dispatch_with_cancel(self, run: RunHandle, action: ActionRequest):
@@ -342,8 +353,32 @@ class AgentRuntime:
             old = run.state
             run = run_transition(run, RunState.RUNNING)
             await self._save(run, old, run.state)
-        await self._store.save_checkpoint(run_id, {"pending": [], "reconciled": True})
-        return await self.verify_and_finish(run_id)
+
+        # T6：重建 context（task 子集 + history 来自检查点）继续主循环，而非仅对账收口
+        task_payload = checkpoint.get("task")
+        if task_payload:
+            task = TaskSpec(**task_payload)
+        else:
+            handle = await self._store.load_task(run.task_id)
+            task = TaskSpec(
+                id=handle.spec_id if handle else run.task_id,
+                kind="recovered",
+                goal={},
+                input_schema={},
+                constraints={},
+                acceptance_criteria=[{"check": "recovered"}],
+            )
+        agent = AgentSpec(id=run.agent_id, role="worker", model_id="recovered")
+        context: dict = {
+            "task": task,
+            "capability_schemas": self._capability_schemas(),
+            "history": list(checkpoint.get("history", [])),
+            "memory": await self._assemble_memory(task),
+            "pending": [],
+        }
+        await self._save_checkpoint(run, context, {"reconciled": True})
+        await self._execution_loop(run, agent, context)
+        return await self._finish_run(run)
 
     async def verify_and_finish(self, run_id: str) -> RunHandle:
         run = await self._store.load_run(run_id)
