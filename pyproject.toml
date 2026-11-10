@@ -29,6 +29,7 @@ members = ["agent-core", "agent-sdk", "agent-explore", "agent-evolve", "agent-ad
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = [
     "agent-core/tests",
     "agent-sdk/tests",

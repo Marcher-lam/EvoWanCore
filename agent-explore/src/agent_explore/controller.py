@@ -9,6 +9,7 @@ DRS：refine(诊断) → 单任务执行 → 验证 → **先整合记忆再出�
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Literal
 
 from agent_core.memory.store import MemoryStore
@@ -221,7 +222,12 @@ class ExplorationController:
             task = by_id.get(outcome.task_id)
             if task is None:
                 continue
-            proposals = reflector(task, outcome) if outcome.status != "error" else []
+            if outcome.status == "error":
+                proposals = []
+            else:
+                proposals = reflector(task, outcome)
+                if inspect.isawaitable(proposals):
+                    proposals = await proposals
             for p in proposals:
                 candidate = await self._writer.propose(
                     kind=p["kind"],

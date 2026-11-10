@@ -45,6 +45,9 @@ class AgentRuntime:
         skill_runner=None,
         execution_policy: ExecutionPolicy | None = None,
         max_steps: int = 20,
+        memory_retriever=None,
+        context_assembler=None,
+        memory_token_budget: int = 400,
     ) -> None:
         self._gateway = gateway
         self._registry = registry
@@ -59,6 +62,9 @@ class AgentRuntime:
         self._max_steps = max_steps
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._cancelled: set[str] = set()
+        self._memory_retriever = memory_retriever
+        self._context_assembler = context_assembler
+        self._memory_token_budget = memory_token_budget
 
     # ---------- 事件与状态助手 ----------
 
@@ -111,11 +117,27 @@ class AgentRuntime:
         run = run_transition(run, RunState.RUNNING)
         await self._save(run, old, run.state)
 
+        memory_text = ""
+        if self._memory_retriever is not None:
+            records = await self._memory_retriever.retrieve(
+                scope={"namespaces": ["rules"]},
+                task_context={
+                    "environment_version": "workbench-1",
+                    "keywords": [task.kind.split(":")[-1], str(task.goal.get("what", ""))],
+                },
+                limit=8,
+            )
+            if self._context_assembler is not None:
+                memory_text = self._context_assembler.assemble(
+                    records, self._memory_token_budget
+                )
+            else:
+                memory_text = "\n".join(str(r.content) for r in records)
         context: dict = {
             "task": task,
             "capability_schemas": self._capability_schemas(),
             "history": [],
-            "memory": "",
+            "memory": memory_text,
             "pending": [],
         }
         policy = self._execution_policy or ModelLoopPolicy(gateway=self._gateway, agent=agent)
