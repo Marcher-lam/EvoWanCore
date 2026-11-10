@@ -446,3 +446,65 @@ async def test_build_app_rejects_practice_heldout_overlap(tmp_path: Path, corpus
             model_adapter=fake, db_path=tmp_path / "x.db", blob_dir=tmp_path / "xb",
             corpus=corpus, practice_part=poisoned_part, heldout_part=leaked,
         )
+
+
+
+async def test_publish_vetoes_unauditable_claims(tmp_path: Path, corpus) -> None:
+    """T31-C 修复：评测门通过但 claim 机器审计不过（不可判/反真值）→ 保持 CANDIDATE。
+    红线（错误晋级率 0）优先于泛化发布路径；正对照（审计过的 claim）仍发布。"""
+    from agent_core.memory.record import MemoryKind, MemoryRecord, VerificationState
+    from agent_core.memory.store import NS_RULES
+    from agent_core.models import FakeModelAdapter, Modality, ModelCapabilities
+    from agent_evolve.controller import EvalReport, ReleaseManifest
+
+    class _PassGate:
+        """评测门恒过桩——把被测点隔离到发布前审计否决。"""
+
+        def __init__(self, **kwargs):  # noqa: ARG002
+            pass
+
+        def submit(self, candidate):  # noqa: ARG002
+            return "cid_stub"
+
+        async def evaluate(self, cid, mini, runner, regression_scenarios=None):  # noqa: ARG002
+            return EvalReport(mini_batch_scores=[1.0], parent_scores=[0.0], improved=True)
+
+        async def publish(self, cid, report, **kwargs):  # noqa: ARG002
+            return ReleaseManifest(candidates=[cid])
+
+    async def _candidate_record(store, rec_id: str, dpi: int) -> None:
+        await store.put(
+            MemoryRecord(
+                id=rec_id, kind=MemoryKind.RULE, namespace=NS_RULES,
+                content={
+                    "statement": f"convert_format 须 dpi>={dpi}",
+                    "claim": {"dimension": "convert", "action": "convert_format",
+                              "params": {"dpi": dpi}},
+                },
+                evidence_refs=["e1"], verification=VerificationState.CANDIDATE,
+                source_refs=["convert_doc_0"],
+            )
+        )
+
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    app = build_app(model_adapter=fake, db_path=tmp_path / "v.db",
+                    blob_dir=tmp_path / "vb", corpus=corpus)
+
+    import agent_evolve.controller as evo_mod
+
+    original = evo_mod.EvolutionController
+    evo_mod.EvolutionController = _PassGate
+    try:
+        # 反例：dpi=100 审计必错（<150）→ 否决发布
+        await _candidate_record(app._memory_store, "cand_bad", 100)  # noqa: SLF001
+        await app._publish_candidates()  # noqa: SLF001
+        bad = await app._memory_store.get("cand_bad")  # noqa: SLF001
+        assert bad.verification.value == "candidate", "机器审计不过的 claim 不得发布"
+
+        # 正对照：dpi=200 审计过 → 发布
+        await _candidate_record(app._memory_store, "cand_good", 200)  # noqa: SLF001
+        await app._publish_candidates()  # noqa: SLF001
+        good = await app._memory_store.get("cand_good")  # noqa: SLF001
+        assert good.verification.value == "verified", "审计过的 claim 应正常发布"
+    finally:
+        evo_mod.EvolutionController = original

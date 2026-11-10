@@ -35,6 +35,7 @@ class SimpleRetriever:
     def __init__(self, store: MemoryStore, include_candidates: bool = False) -> None:
         self._store = store
         self.include_candidates = include_candidates  # 公有：app 的可见性开关（V2 §6.4）
+        self.candidate_allowlist: set[str] | None = None  # with 臂单候选隔离（T31-C）
 
     async def retrieve(self, scope: dict, task_context: dict, limit: int) -> list[MemoryRecord]:
         records: list[MemoryRecord] = []
@@ -48,6 +49,13 @@ class SimpleRetriever:
         records = [r for r in records if r.lifecycle is LifecycleState.ACTIVE]
         if not self.include_candidates:
             records = [r for r in records if r.verification is not VerificationState.CANDIDATE]
+        elif self.candidate_allowlist is not None:
+            records = [
+                r
+                for r in records
+                if r.verification is not VerificationState.CANDIDATE
+                or r.id in self.candidate_allowlist
+            ]
 
         scored: list[tuple[float, int, MemoryRecord]] = []
         for idx, r in enumerate(records):

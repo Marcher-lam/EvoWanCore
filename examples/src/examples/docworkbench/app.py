@@ -133,10 +133,17 @@ class DocumentAgentApp:
         """注入式 reflector（V2 T10）：LLMReflector 须共享 app gateway 以计入真实调用。"""
         self._reflector_impl = reflector
 
-    def set_memory_visibility(self, include_candidates: bool) -> None:
-        """V2 §6.4：切换候选记忆可见性（评测门 with/without 双臂 + 审计）。"""
+    def set_memory_visibility(
+        self, include_candidates: bool, only: set[str] | None = None
+    ) -> None:
+        """V2 §6.4：切换候选记忆可见性（评测门 with/without 双臂 + 审计）。
+
+        only：with 臂单候选隔离——被评候选之外的其他 pending 候选不得进入上下文
+        （跨候选污染曾让错误规则借他人之力的对照差过门，T31-C）。
+        """
         if self._memory_retriever is not None:
             self._memory_retriever.include_candidates = include_candidates
+            self._memory_retriever.candidate_allowlist = only
 
     @property
     def practice_task_ids(self) -> set[str]:
@@ -338,8 +345,13 @@ class DocumentAgentApp:
                     practice_ids, heldout_ids, dimensions=target_dims, exclude=True, limit=2
                 )
 
-                async def runner(task: TaskSpec, *, with_candidate: bool) -> float:
-                    self.set_memory_visibility(with_candidate)
+                async def runner(
+                    task: TaskSpec,
+                    *,
+                    with_candidate: bool,
+                    _only: frozenset[str] = frozenset({r.id}),  # B023：默认参绑定本轮候选
+                ) -> float:
+                    self.set_memory_visibility(with_candidate, only=set(_only))
                     corpus_task = next(
                         t for t in self._corpus.tasks if t["id"] == task.id
                     )
@@ -364,6 +376,11 @@ class DocumentAgentApp:
                     manifest = await evolution.publish(cid, report)
                 except PublishDenied:
                     continue  # 未过门：保持 CANDIDATE，等待反例/复审
+                # T31-C 红线否决：claim 机器审计不过（反真值/不可判）不发布——
+                # 错误晋级率=0 优先于泛化发布路径（eval 门仍是主门，此处仅拦
+                # 审计必错的 claim；见台账 Ruling）
+                if not audit_ok:
+                    continue
                 await self._publisher.publish(
                     r.id,
                     verifier_report={

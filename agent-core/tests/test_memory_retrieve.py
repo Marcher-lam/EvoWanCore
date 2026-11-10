@@ -112,3 +112,33 @@ async def test_invalidated_rule_not_retrieved(store: SqliteMemoryStore) -> None:
         scope={"namespaces": [NS_RULES]}, task_context={"environment_version": "1.0"}, limit=5
     )
     assert [r.id for r in got2] == [fresh.id]
+
+
+async def test_candidate_visibility_allowlist(store: SqliteMemoryStore) -> None:
+    """T31-C 修复：include_candidates 可限定白名单——评测门 with 臂只见被评候选，
+    其他 pending 候选不得串味（跨候选污染曾致错误规则过门）。"""
+    from agent_core.memory.record import MemoryKind, MemoryRecord
+
+    a = MemoryRecord(id="cand_a", kind=MemoryKind.RULE, namespace=NS_RULES,
+                     content={"statement": "候选 A"}, evidence_refs=["e"],
+                     verification=VerificationState.CANDIDATE)
+    b = MemoryRecord(id="cand_b", kind=MemoryKind.RULE, namespace=NS_RULES,
+                     content={"statement": "候选 B"}, evidence_refs=["e"],
+                     verification=VerificationState.CANDIDATE)
+    await store.put(a)
+    await store.put(b)
+
+    retriever = SimpleRetriever(store, include_candidates=True)
+    retriever.candidate_allowlist = {"cand_a"}
+    got = await retriever.retrieve(
+        scope={"namespaces": [NS_RULES]},
+        task_context={"environment_version": None, "keywords": []}, limit=10,
+    )
+    assert [r.id for r in got] == ["cand_a"], "白名单外的候选不得进入 with 臂上下文"
+
+    retriever.candidate_allowlist = None
+    got2 = await retriever.retrieve(
+        scope={"namespaces": [NS_RULES]},
+        task_context={"environment_version": None, "keywords": []}, limit=10,
+    )
+    assert {r.id for r in got2} == {"cand_a", "cand_b"}
