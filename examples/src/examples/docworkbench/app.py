@@ -99,6 +99,7 @@ class DocumentAgentApp:
         event_log=None,
         memory_retriever=None,
         evo_db_path: Path | None = None,
+        reflector=None,
     ) -> None:
         self._gateway = gateway
         self._runtime = runtime
@@ -114,12 +115,22 @@ class DocumentAgentApp:
         self._event_log = event_log
         self._memory_retriever = memory_retriever
         self._evo_db_path = evo_db_path
+        self._reflector_impl = reflector  # 注入式 reflector（V2 T10 LLMReflector）
         self._agent = AgentSpec(id="doc_agent", role="document worker", model_id="m-app")
 
     @property
     def model_counter(self):
         """真实调用计数器（CountingAdapter）——实验两臂的统一预算口径（§6.2）。"""
         return self._model_counter
+
+    @property
+    def gateway(self):
+        """app 网关（物理适配器外已包 CountingAdapter——注入组件共享计量）。"""
+        return self._gateway
+
+    def use_reflector(self, reflector) -> None:
+        """注入式 reflector（V2 T10）：LLMReflector 须共享 app gateway 以计入真实调用。"""
+        self._reflector_impl = reflector
 
     def set_memory_visibility(self, include_candidates: bool) -> None:
         """V2 §6.4：切换候选记忆可见性（评测门 with/without 双臂 + 审计）。"""
@@ -161,7 +172,7 @@ class DocumentAgentApp:
             app_context={
                 "runtime": self._runtime,
                 "agent": self._agent,
-                "reflector": self._reflector,
+                "reflector": self._reflector_impl or self._reflector,
                 "environment_version": ENV_VERSION,
                 "practice_pool": self._practice_pool(),
                 "model_counter": self._model_counter,
@@ -383,6 +394,7 @@ def build_app(
     corpus: Corpus,
     practice_part: CorpusPart | None = None,
     verifier=None,
+    reflector=None,
 ) -> DocumentAgentApp:
     from agent_core.models import CountingAdapter, ModelGateway
 
@@ -443,4 +455,5 @@ def build_app(
         event_log=event_log,
         memory_retriever=retriever,
         evo_db_path=Path(db_path).with_suffix(".evo.db"),
+        reflector=reflector,
     )

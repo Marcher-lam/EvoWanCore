@@ -32,6 +32,7 @@ def run_experiment(config: str, out: str) -> None:
             seed, raw.get("size", 8), raw.get("difficulty", 0.4)
         ),
         workdir=Path(out).parent / "workdirs",
+        use_llm_reflector=raw.get("llm_reflector", False),
     )
     report = asyncio.run(run_experiment(cfg))
     path = Path(out)

@@ -28,6 +28,7 @@ class ExperimentConfig:
     adapter_factory: Callable[[int], ModelAdapter] | None = None
     workdir: Path | None = None
     max_waves: int = 4
+    use_llm_reflector: bool = False  # V2 B 检查点：真 LLM 反思（T10）
 
 
 class ArmReport(BaseModel):
@@ -172,6 +173,11 @@ async def _explore_arm(
         corpus=corpus,
         practice_part=practice,
     )
+    if config.use_llm_reflector:
+        from agent_explore.reflector import LLMReflector
+
+        # 共享 app gateway：reflector 调用经 CountingAdapter 计入真实预算（§6.2）
+        app.use_reflector(LLMReflector(gateway=app.gateway, model_id="m-app"))
     report = await app.explore(
         ExplorationPolicy(mode="broad", budget=config.budget_w, max_waves=config.max_waves)
     )
