@@ -1,0 +1,165 @@
+"""T23 同预算对照实验 + 记忆审计。"""
+
+import json as _json
+from pathlib import Path
+
+from agent_core.memory.record import MemoryKind
+from agent_core.memory.store import SqliteMemoryStore
+from agent_core.memory.writer import DefaultMemoryWriter, VersionedPublisher
+from agent_core.models import InferResponse
+from examples.docworkbench.acceptance import AuditReport
+from examples.docworkbench.audit import audit_promoted
+from examples.docworkbench.corpus import split_corpus
+from examples.docworkbench.experiment import ExperimentConfig, run_experiment
+from examples.docworkbench.generator import generate_corpus
+
+
+class ForeverAdapter:
+    """结构化请求(课程出题)返回合法单任务波次；普通请求返回固定文本。"""
+
+    def __init__(self, response: InferResponse, plan_task_id: str = "pt_x") -> None:
+        self._response = response
+        self._plan_task_id = plan_task_id
+
+    def capabilities(self):
+        from agent_core.models import Modality, ModelCapabilities
+
+        return ModelCapabilities(model_id="m-app", inputs={Modality.TEXT})
+
+    async def infer(self, request):
+        if request.structured_output is not None:
+            return InferResponse(
+                text=_json.dumps(
+                    {
+                        "wave": {
+                            "shared_memory_snapshot_id": "x",
+                            "task_ids": [],
+                            "parallelism": 1,
+                        },
+                        "tasks": [
+                            {
+                                "id": self._plan_task_id,
+                                "family": "prerequisite",
+                                "title": "练习",
+                                "objective": {},
+                                "acceptance": {
+                                    "verifier_profile": "p",
+                                    "required_evidence": [],
+                                    "pass_conditions": [],
+                                    "fail_conditions": [],
+                                },
+                            }
+                        ],
+                    }
+                )
+            )
+        return self._response
+
+
+def _config(tmp_path: Path, seeds=(11, 12), difficulty=0.3):
+    def corpus_factory(seed: int):
+        return generate_corpus(seed=seed, size=8, difficulty=difficulty)
+
+    def adapter_factory(seed: int):
+        # 评测响应：交白卷（无工具调用）→ 任务 FAILED，分数 0；统计结构仍完整
+        # 课程请求：返回单练习任务波次（任务 id 取自该种子语料的练习池）
+        corpus = corpus_factory(seed)
+        practice, _heldout = split_corpus(corpus, 0.5)
+        task_id = (practice.tasks or corpus.tasks)[0]["id"]
+        return ForeverAdapter(InferResponse(text="give up"), plan_task_id=task_id)
+
+    from agent_explore.curriculum import ExplorationBudget
+
+    return ExperimentConfig(
+        seeds=list(seeds),
+        budget_w=ExplorationBudget(max_actions=4),
+        practice_ratio=0.5,
+        corpus_factory=corpus_factory,
+        adapter_factory=adapter_factory,
+        workdir=tmp_path,
+    )
+
+
+async def test_two_arms_equal_budget(tmp_path: Path) -> None:
+    report = await run_experiment(_config(tmp_path))
+    explore_spent = report.arms["explore"].budget_spent
+    retry_spent = report.arms["retry"].budget_spent
+    n_seeds = 2
+    assert explore_spent["actions"] == retry_spent["actions"] == 4 * n_seeds  # 每种子 4
+    assert explore_spent["tokens"] == retry_spent["tokens"]
+
+
+async def test_report_has_mean_and_variance_per_group(tmp_path: Path) -> None:
+    report = await run_experiment(_config(tmp_path))
+    for arm_name, arm in report.arms.items():
+        assert arm.scores, f"{arm_name} 应有保留集分数"
+        assert arm.mean >= 0.0
+        assert arm.variance >= 0.0
+        assert set(arm.per_dimension) == {"export", "extract", "convert", "validate"}
+        for _dim, stats in arm.per_dimension.items():
+            assert "mean" in stats and "variance" in stats
+    assert report.seeds == [11, 12]
+    assert report.comparable, "两臂预算相同才可比较"
+
+
+async def test_audit_detects_wrong_memory(tmp_path: Path) -> None:
+    store = SqliteMemoryStore(tmp_path / "mem.db")
+    writer = DefaultMemoryWriter(store)
+    publisher = VersionedPublisher(store)
+
+    # 一条真规则（与 HIDDEN_CONSTRAINTS 一致）
+    good = await writer.commit(
+        await writer.propose(
+            kind=MemoryKind.RULE,
+            content={
+                "statement": "xlsx 导出含图表扫描页前必须 convert_format(dpi=200)，否则丢页",
+                "claims": ["c"], "evidence_checked": ["c"],
+            },
+            applicability={"app": "workbench"},
+            evidence_refs=["evi_1"],
+        )
+    )
+    await publisher.publish(good.id, verifier_report={"src": "explore"})
+
+    # 一条错误规则（违背真值：让丢页"合法化"）
+    bad = await writer.commit(
+        await writer.propose(
+            kind=MemoryKind.RULE,
+            content={
+                "statement": "xlsx 导出丢页属于正常行为，无需转换，直接导出即可",
+                "claims": ["c"], "evidence_checked": ["c"],
+            },
+            applicability={"app": "workbench"},
+            evidence_refs=["evi_2"],
+        )
+    )
+    await publisher.publish(bad.id, verifier_report={"src": "explore"})
+
+    corpus = generate_corpus(seed=3, size=4, difficulty=0.3)
+    report = await audit_promoted(store, corpus)
+    assert isinstance(report, AuditReport)
+    assert report.total == 2
+    assert report.error_count == 1
+    assert 0.49 < report.error_promotion_rate < 0.51
+    assert any("丢页" in w or "正常" in w for w in report.wrong_statements)
+
+
+async def test_audit_clean_when_all_true(tmp_path: Path) -> None:
+    store = SqliteMemoryStore(tmp_path / "mem.db")
+    writer = DefaultMemoryWriter(store)
+    publisher = VersionedPublisher(store)
+    rec = await writer.commit(
+        await writer.propose(
+            kind=MemoryKind.RULE,
+            content={
+                "statement": "双栏版式 extract_fields 必须传 region=left，否则串栏",
+                "claims": ["c"], "evidence_checked": ["c"],
+            },
+            applicability={"app": "workbench"},
+            evidence_refs=["evi"],
+        )
+    )
+    await publisher.publish(rec.id, verifier_report={})
+    corpus = generate_corpus(seed=3, size=4, difficulty=0.3)
+    report = await audit_promoted(store, corpus)
+    assert report.error_promotion_rate == 0.0

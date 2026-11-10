@@ -20,3 +20,5 @@ def run_acceptance(task_id: str, result: dict, corpus: Corpus) -> AcceptanceRepo
         )
     outcome = script(result)
     return AcceptanceReport(passed=bool(outcome["passed"]), checks=outcome["checks"])
+
+from examples.docworkbench.audit import AuditReport  # noqa: F401,E402 — 再导出便于单入口导入
