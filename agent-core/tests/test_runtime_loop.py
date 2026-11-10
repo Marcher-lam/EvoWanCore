@@ -372,17 +372,15 @@ async def test_cancel_during_verify_yields_cancelled(tmp_path: Path) -> None:
         verifier=SlowVerifier(),
     )
 
-    verify_task = asyncio.create_task(env.runtime.verify_and_finish("run_manual"))
-    # 手动准备一个 RUNNING run
+    # 先落一个 RUNNING run，再启动 verify——顺序错误会造成测试自身竞态
     from agent_core.run import RunHandle, RunState
+    from agent_core.task import TaskHandle
 
     run = RunHandle(id="run_manual", task_id="task_manual", agent_id="a1", state=RunState.RUNNING)
-    await env.state_store.save_task(
-        __import__("agent_core.task", fromlist=["TaskHandle"]).TaskHandle(
-            id="task_manual", spec_id="spec_manual"
-        )
-    )
+    await env.state_store.save_task(TaskHandle(id="task_manual", spec_id="spec_manual"))
     await env.state_store.save_run(run)
+
+    verify_task = asyncio.create_task(env.runtime.verify_and_finish("run_manual"))
     await asyncio.wait_for(asyncio.create_task(entered_verify.wait()), timeout=2)
     await env.runtime.cancel("run_manual")  # verify 挂起期间取消
     release_verify.set()
