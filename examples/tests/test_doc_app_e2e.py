@@ -388,3 +388,34 @@ async def test_gate_targets_dims_by_claim_action(tmp_path: Path, corpus) -> None
     assert set(dims) == {"export", "extract"}, "convert 规则的验证场在 export/extract 陷阱"
     assert app._claim_target_dims({"action": "extract_fields"}) == ["extract"]  # noqa: SLF001
     assert app._claim_target_dims({}) == []  # 无 claim → 调用方退回来源维度
+
+
+async def test_solve_starts_from_pristine_doc(tmp_path: Path) -> None:
+    """T23 迭代 5（关键）：solve 从原始文档起——评测门父子臂不得经共享 derived 串味
+    （with 臂 convert 的产物不能让 parent 臂白读真值）。"""
+    from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
+
+    hard = generate_corpus(seed=41, size=8, difficulty=0.8, perceptual=True)
+    practice, _ = split_corpus(hard, practice_ratio=0.5)
+    task = next(t for t in practice.tasks if t["dimension"] == "extract")
+    holder: dict = {}
+
+    def vlm_factory(corpus, derived):
+        holder["derived"] = derived
+        return WorkbenchFakeVLM(corpus, derived)
+
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    app = build_app(
+        model_adapter=fake, db_path=tmp_path / "iso.db", blob_dir=tmp_path / "ib",
+        corpus=hard, practice_part=practice, vlm_factory=vlm_factory,
+    )
+    # 污染：上一轮（with 臂）convert 的产物残留
+    from examples.docworkbench.tools import convert_format
+
+    doc = next(d for d in hard.documents if d["id"] == task["doc_id"])
+    holder["derived"][task["doc_id"]] = convert_format(doc, dpi=200)
+
+    run = await app.solve(task)  # 无已发布规则 → FakeVLM 应见原始低对比度文档而读错
+    assert run.state.value == "failed", (
+        "solve 必须从原始文档开始——共享 derived 会让 parent 臂（及重试臂）白读真值"
+    )

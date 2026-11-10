@@ -145,6 +145,9 @@ class DocumentAgentApp:
         return {t["id"] for t in self._practice_part.tasks}
 
     async def solve(self, corpus_task: dict) -> RunHandle:
+        # T23：每次 solve 从原始文档开始——评测门父子臂/重试臂不得共享上一轮 convert
+        # 的派生产物（否则 parent 臂经 with 臂的 derived 白读真值，对照失效）
+        self._derived.pop(corpus_task["doc_id"], None)
         # T21：感知任务（image_required）→ vision 约束 + 渲染 PNG 作 data URL
         constraints: dict = {}
         if corpus_task.get("image_required"):
