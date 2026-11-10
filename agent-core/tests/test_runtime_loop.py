@@ -342,3 +342,49 @@ def test_reserved_contracts_importable() -> None:
 
     assert ExecutionPolicy is not None
     assert ModelLoopPolicy is not None
+
+
+async def test_cancel_during_verify_yields_cancelled(tmp_path: Path) -> None:
+    """M7: verify 进行中收到 cancel → 最终 CANCELLED，不被过期内存态覆盖。"""
+    import asyncio
+
+    from agent_core.runtime.driver import VerificationResult
+
+    entered_verify = asyncio.Event()
+    release_verify = asyncio.Event()
+
+    class SlowVerifier:
+        async def verify_action(self, request, result):
+            return VerificationResult(passed=True)
+
+        async def verify_task(self, task, evidence_refs):
+            entered_verify.set()
+            await release_verify.wait()
+            return VerificationResult(passed=True)
+
+    async def handler(args):
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text="done")],
+        handler=handler,
+        verifier=SlowVerifier(),
+    )
+
+    verify_task = asyncio.create_task(env.runtime.verify_and_finish("run_manual"))
+    # 手动准备一个 RUNNING run
+    from agent_core.run import RunHandle, RunState
+
+    run = RunHandle(id="run_manual", task_id="task_manual", agent_id="a1", state=RunState.RUNNING)
+    await env.state_store.save_task(
+        __import__("agent_core.task", fromlist=["TaskHandle"]).TaskHandle(
+            id="task_manual", spec_id="spec_manual"
+        )
+    )
+    await env.state_store.save_run(run)
+    await asyncio.wait_for(asyncio.create_task(entered_verify.wait()), timeout=2)
+    await env.runtime.cancel("run_manual")  # verify 挂起期间取消
+    release_verify.set()
+    final = await verify_task
+    assert final.state.value == "cancelled"

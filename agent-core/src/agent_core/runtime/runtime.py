@@ -336,6 +336,14 @@ class AgentRuntime:
             if e.type == "ActionSucceeded":
                 evidence_refs.extend(e.payload.get("evidence_refs", []))
         result = await self._verifier.verify_task(task, evidence_refs)
+        # M7: 验证期间可能收到取消——终态迁移前重读最新状态，取消优先
+        run = await self._store.load_run(run_id) or run
+        if run.state is RunState.CANCELLING:
+            old = run.state
+            run = run_transition(run, RunState.CANCELLED)
+            return await self._save(run, old, run.state)
+        if run.state is RunState.CANCELLED:
+            return run
         old = run.state
         target = RunState.SUCCEEDED if result.passed else RunState.FAILED
         run = run_transition(run, target)
