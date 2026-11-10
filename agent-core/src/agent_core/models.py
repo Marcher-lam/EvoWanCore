@@ -64,6 +64,7 @@ SessionEventType = Literal[
     "tool_call",
     "audio_out",
     "interrupted",
+    "session_resumed",
     "error",
     "closed",
 ]
