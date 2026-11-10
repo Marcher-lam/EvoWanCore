@@ -3,6 +3,7 @@
 import json as _json
 from pathlib import Path
 
+import pytest
 from agent_core.memory.record import MemoryKind
 from agent_core.memory.store import SqliteMemoryStore
 from agent_core.memory.writer import DefaultMemoryWriter, VersionedPublisher
@@ -196,3 +197,20 @@ async def test_default_factory_uses_env_provider(tmp_path: Path, monkeypatch) ->
         assert built[0]["capabilities"].model_id == "ds-flash"
     finally:
         oc.OpenAICompatAdapter = orig  # type: ignore[assignment]
+
+
+def test_arm_stats_per_dimension_covers_all_seeds() -> None:
+    """修复回归：per_dimension 必须统计全部种子的任务，而非只映射末位种子。"""
+    from examples.docworkbench.experiment import _arm_stats
+
+    dims = ["export", "extract", "convert", "validate"]
+    pairs = []
+    for seed in range(3):  # 3 个种子，各 4 题；分数随种子变（seed2 全挂）
+        for i, dim in enumerate(dims):
+            pairs.append(
+                ({"id": f"{dim}_{seed}_{i}", "dimension": dim}, 1.0 if seed < 2 else 0.0)
+            )
+    arm = _arm_stats("x", pairs, spent={}, attempts=12)
+    # 每个维度应有 3 题分数（3 种子）：mean = 2/3，若只统计末位种子则恒为 0.0
+    for dim in dims:
+        assert arm.per_dimension[dim]["mean"] == pytest.approx(2 / 3), f"{dim} 应含 3 种子的分数"

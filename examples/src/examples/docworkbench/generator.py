@@ -17,8 +17,12 @@ DIMS = ["export", "extract", "convert", "validate"]
 
 
 def _make_doc(rng: random.Random, i: int, difficulty: float) -> dict:
-    layout = rng.choice(["form", "report", "two_column"])
-    kind = "scan" if rng.random() < 0.3 else "native"
+    # 高难度：双栏版式加权（region 陷阱更多）、扫描件更多（低对比度字段）
+    hard = difficulty >= 0.7
+    layouts = ["two_column", "two_column"] if hard else ["two_column"]
+    layouts += ["form", "report"]
+    layout = rng.choice(layouts)
+    kind = "scan" if rng.random() < (0.5 if hard else 0.3) else "native"
     n_fields = 3 + int(difficulty * 6)
     fields = []
     for fi in range(n_fields):
@@ -35,7 +39,7 @@ def _make_doc(rng: random.Random, i: int, difficulty: float) -> dict:
         fields.append({"name": "invoice_no", "value": f"TMP-{rng.randrange(1000, 9999)}0"})
 
     pages = [{"layout": layout, "is_chart_scan": False} for _ in range(rng.randint(1, 3))]
-    has_chart = rng.random() < 0.5
+    has_chart = rng.random() < (0.9 if hard else 0.5)
     if has_chart:
         pages.append({"layout": "chart", "is_chart_scan": True})
 

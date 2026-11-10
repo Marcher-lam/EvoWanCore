@@ -125,21 +125,22 @@ def _default_adapter_factory(corpus_factory, practice_ratio: float):
     return factory
 
 
-async def _eval_heldout(app, heldout) -> list[float]:
-    scores: list[float] = []
+async def _eval_heldout(app, heldout) -> list[tuple[dict, float]]:
+    pairs: list[tuple[dict, float]] = []
     for task in heldout.tasks:
         run = await app.solve(task)
-        scores.append(1.0 if run.state.value == "succeeded" else 0.0)
-    return scores
+        pairs.append((task, 1.0 if run.state.value == "succeeded" else 0.0))
+    return pairs
 
 
 def _arm_stats(
-    name: str, scores: list[float], tasks: list[dict], spent: dict, attempts: int
+    name: str, pairs: list[tuple[dict, float]], spent: dict, attempts: int
 ) -> ArmReport:
+    """pairs: (task, score) 对——跨种子收集，分组按 task 自带 dimension。"""
+    scores = [s for _, s in pairs]
     per_dim: dict[str, dict] = {}
-    dim_of = {t["id"]: t["dimension"] for t in tasks}
     for dim in DIMS:
-        ds = [s for t, s in zip(tasks, scores, strict=False) if dim_of[t["id"]] == dim]
+        ds = [s for t, s in pairs if t["dimension"] == dim]
         per_dim[dim] = {
             "mean": statistics.mean(ds) if ds else 0.0,
             "variance": statistics.pvariance(ds) if len(ds) > 1 else 0.0,
@@ -155,7 +156,9 @@ def _arm_stats(
     )
 
 
-async def _explore_arm(config: ExperimentConfig, seed: int, corpus, practice, heldout) -> ArmReport:
+async def _explore_arm(
+    config: ExperimentConfig, seed: int, corpus, practice, heldout
+) -> tuple[ArmReport, list[tuple[dict, float]]]:
     workdir = (config.workdir or Path(".")) / f"seed{seed}" / "explore"
     workdir.mkdir(parents=True, exist_ok=True)
     adapter_factory = config.adapter_factory or _default_adapter_factory(
@@ -172,12 +175,13 @@ async def _explore_arm(config: ExperimentConfig, seed: int, corpus, practice, he
     report = await app.explore(
         ExplorationPolicy(mode="broad", budget=config.budget_w, max_waves=config.max_waves)
     )
-    scores = await _eval_heldout(app, heldout)
-    tasks = heldout.tasks
-    return _arm_stats("explore", scores, tasks, report.budget_spent, report.tasks_executed)
+    pairs = await _eval_heldout(app, heldout)
+    return _arm_stats("explore", pairs, report.budget_spent, report.tasks_executed), pairs
 
 
-async def _retry_arm(config: ExperimentConfig, seed: int, corpus, practice, heldout) -> ArmReport:
+async def _retry_arm(
+    config: ExperimentConfig, seed: int, corpus, practice, heldout
+) -> tuple[ArmReport, list[tuple[dict, float]]]:
     """等量预算直接反复 target_attempt（不写长期记忆），再评保留集。"""
     from agent_explore.curriculum import BudgetMeter
 
@@ -206,26 +210,24 @@ async def _retry_arm(config: ExperimentConfig, seed: int, corpus, practice, held
         i += 1
         if attempts > 1000:  # 安全阀
             break
-    scores = await _eval_heldout(app, heldout)
-    return _arm_stats("retry", scores, heldout.tasks, meter.status.spent, attempts)
+    pairs = await _eval_heldout(app, heldout)
+    return _arm_stats("retry", pairs, meter.status.spent, attempts), pairs
 
 
 async def run_experiment(config: ExperimentConfig) -> ExperimentReport:
-    all_scores: dict[str, list[float]] = {"explore": [], "retry": []}
-    all_tasks: list[dict] = []
+    all_pairs: dict[str, list[tuple[dict, float]]] = {"explore": [], "retry": []}
     spent: dict[str, dict] = {"explore": {}, "retry": {}}
     attempts: dict[str, int] = {"explore": 0, "retry": 0}
 
     for seed in config.seeds:
         corpus = config.corpus_factory(seed)
         practice, heldout = split_corpus(corpus, config.practice_ratio)
-        all_tasks = heldout.tasks
 
-        explore = await _explore_arm(config, seed, corpus, practice, heldout)
-        retry = await _retry_arm(config, seed, corpus, practice, heldout)
+        explore, explore_pairs = await _explore_arm(config, seed, corpus, practice, heldout)
+        retry, retry_pairs = await _retry_arm(config, seed, corpus, practice, heldout)
 
-        all_scores["explore"].extend(explore.scores)
-        all_scores["retry"].extend(retry.scores)
+        all_pairs["explore"].extend(explore_pairs)
+        all_pairs["retry"].extend(retry_pairs)
         for dim in ("actions", "tokens", "cost", "wall_clock_s"):
             spent["explore"][dim] = spent["explore"].get(dim, 0) + explore.budget_spent.get(dim, 0)
             spent["retry"][dim] = spent["retry"].get(dim, 0) + retry.budget_spent.get(dim, 0)
@@ -233,8 +235,8 @@ async def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         attempts["retry"] += retry.attempts
 
     arms = {
-        name: _arm_stats(name, scores, all_tasks, spent[name], attempts[name])
-        for name, scores in all_scores.items()
+        name: _arm_stats(name, pairs, spent[name], attempts[name])
+        for name, pairs in all_pairs.items()
     }
     comparable = spent["explore"].get("actions", 0) == spent["retry"].get("actions", 0)
     return ExperimentReport(seeds=config.seeds, arms=arms, comparable=comparable)
