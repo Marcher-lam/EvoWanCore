@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.memory.record import MemoryRecord, VerificationState
+from agent_core.memory.record import LifecycleState, MemoryRecord, VerificationState
 from agent_core.memory.store import MemoryStore
 
 _BASE_SCORE = {
@@ -38,6 +38,9 @@ class SimpleRetriever:
 
         env = task_context.get("environment_version")
         keywords = [k.lower() for k in task_context.get("keywords", [])]
+
+        # I3: 只有 ACTIVE 生命周期才可进入执行上下文（回滚/失效必须立刻生效）
+        records = [r for r in records if r.lifecycle is LifecycleState.ACTIVE]
 
         scored: list[tuple[float, int, MemoryRecord]] = []
         for idx, r in enumerate(records):

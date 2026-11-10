@@ -185,3 +185,21 @@ async def test_invalidate_propagates_to_dependents(store: SqliteMemoryStore) -> 
     assert dead.lifecycle.value == "expired"
     marked = await store.get(dependent.id)
     assert marked.verification is VerificationState.DISPUTED  # 派生结论自动待复核
+
+
+async def test_publish_refuses_failed_verifier_report(store: SqliteMemoryStore) -> None:
+    """I1 防线：验收报告未通过，禁止晋级 VERIFIED。"""
+    writer = DefaultMemoryWriter(store)
+    publisher = VersionedPublisher(store)
+    committed = await writer.commit(
+        await writer.propose(
+            kind=MemoryKind.RULE,
+            content={"statement": "x", "claims": ["c"], "evidence_checked": ["c"]},
+            applicability={},
+            evidence_refs=["evi"],
+        )
+    )
+    with pytest.raises(Exception, match="验收报告未通过"):
+        await publisher.publish(committed.id, verifier_report={"passed": False, "checks": []})
+    still = await store.get(committed.id)
+    assert still.verification is VerificationState.CANDIDATE  # 未被晋级

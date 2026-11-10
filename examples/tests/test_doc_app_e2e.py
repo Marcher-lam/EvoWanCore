@@ -152,3 +152,94 @@ def test_heldout_invisible_to_explore(tmp_path: Path, corpus) -> None:
     )
     assert app.practice_task_ids == {t["id"] for t in practice.tasks}
     assert not app.practice_task_ids & {t["id"] for t in heldout.tasks}
+
+
+async def test_publish_gate_blocks_wrong_and_unevidenced_rules(tmp_path: Path) -> None:
+    """I1 回归：错误陈述不晋级；无真实证据不写记忆。"""
+    corpus = _make_corpus()
+    convert_task = next(t for t in corpus.tasks if t["dimension"] == "convert")
+    plan = json.dumps(
+        {
+            "wave": {"shared_memory_snapshot_id": "x", "task_ids": [], "parallelism": 1},
+            "tasks": [
+                {
+                    "id": convert_task["id"],
+                    "family": "prerequisite",
+                    "title": "练习",
+                    "objective": {},
+                    "acceptance": {
+                        "verifier_profile": "p",
+                        "required_evidence": [],
+                        "pass_conditions": [],
+                        "fail_conditions": [],
+                    },
+                }
+            ],
+        }
+    )
+    # 1) 练习通过但 reflector 产出错误陈述 → 不晋级（保持 CANDIDATE）
+    fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+        [
+            InferResponse(text=plan),
+            InferResponse(
+                tool_calls=[
+                    {"id": "c", "name": "convert_format",
+                     "arguments": {"doc_id": convert_task["doc_id"], "dpi": 200}}
+                ]
+            ),
+            InferResponse(text="done"),
+        ],
+    )
+    app = build_app(
+        model_adapter=fake, db_path=tmp_path / "a.db", blob_dir=tmp_path / "b1", corpus=corpus
+    )
+    wrong_reflector = lambda task, outcome: [  # noqa: E731
+        {
+            "kind": "rule",
+            "content": {
+                "statement": "xlsx 导出丢页是正常行为，无需转换",
+                "claims": ["c"], "evidence_checked": ["c"],
+            },
+            "applicability": {"app": "workbench"},
+            "evidence_refs": outcome.evidence_refs,
+        }
+    ]
+    app._reflector = wrong_reflector  # noqa: SLF001
+    await app.explore()
+    rules = await app._memory_store.query("rules", {})  # noqa: SLF001
+    assert rules and rules[0].verification.value == "candidate", "错误陈述不得晋级"
+
+    # 2) 练习通过但无证据引用 → 不写任何记忆
+    fake2 = FakeModelAdapter(
+        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+        [
+            InferResponse(text=plan),
+            InferResponse(
+                tool_calls=[
+                    {"id": "c", "name": "convert_format",
+                     "arguments": {"doc_id": convert_task["doc_id"], "dpi": 200}}
+                ]
+            ),
+            InferResponse(text="done"),
+        ],
+    )
+    app2 = build_app(
+        model_adapter=fake2, db_path=tmp_path / "a2.db", blob_dir=tmp_path / "b2", corpus=corpus
+    )
+    app2._reflector = lambda task, outcome: [  # noqa: E731
+        {
+            "kind": "rule",
+            "content": {
+                "statement": "xlsx 导出前必须 convert_format(dpi=200)",
+                "claims": ["c"], "evidence_checked": ["c"],
+            },
+            "applicability": {"app": "workbench"},
+            "evidence_refs": [],  # 无真实证据
+        }
+    ]
+    await app2.explore()
+    rules2 = await app2._memory_store.query("rules", {})  # noqa: SLF001
+    assert all(
+        r.verification.value == "candidate" for r in rules2
+    ), "无证据引用的记忆最多保持 CANDIDATE，不得晋级"

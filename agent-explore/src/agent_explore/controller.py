@@ -30,7 +30,7 @@ from agent_explore.curriculum import (
     ExplorationBudget,
 )
 from agent_explore.curriculum_memory import CurriculumMemoryAssembler
-from agent_explore.gaps import GapLedger
+from agent_explore.gaps import Gap, GapLedger, GapType
 from agent_explore.practice import PracticeTask, TaskFamily
 
 
@@ -142,13 +142,18 @@ class ExplorationController:
             # V1 快照语义：并行期间不写入，波次边界即快照边界
             snapshot_id = f"snap_{wave_n}"
             plan = await self._curriculum.plan_wave(
-                view, "broad", policy.budget, shared_memory_snapshot_id=snapshot_id
+                view,
+                "broad",
+                policy.budget,
+                shared_memory_snapshot_id=snapshot_id,
+                practice_pool=app_context.get("practice_pool"),
             )
 
             outcomes = await self._run_wave(plan.tasks, verifier, app_context)
             report.waves_executed += 1
             report.tasks_executed += len(outcomes)
             report.tasks_passed += sum(1 for o in outcomes if o.status == "passed")
+            report.gaps_opened += await self._record_gaps(plan.tasks, outcomes)
 
             new_hints, generated = await self._merge_outcomes(plan.tasks, outcomes, app_context)
             hints.extend(new_hints)
@@ -161,6 +166,30 @@ class ExplorationController:
             )
             if meter.status.exhausted:
                 break
+
+    async def _record_gaps(
+        self, tasks: list[PracticeTask], outcomes: list[PracticeOutcome]
+    ) -> int:
+        """I5: 失败/异常的练习 → GapLedger（gap-driven 课程的输入）。"""
+        opened = 0
+        for outcome in outcomes:
+            if outcome.status == "passed":
+                continue
+            gap_type = GapType.KNOWLEDGE if outcome.status == "failed" else GapType.VERIFICATION
+            await self._gaps.record(
+                Gap(
+                    gap_type=gap_type,
+                    title=f"练习未通过: {outcome.title}",
+                    description=f"family={outcome.family}, status={outcome.status}",
+                    severity=0.6,
+                    affected_capabilities=[outcome.task_id],
+                    reproduce_conditions={"task_id": outcome.task_id},
+                    evidence_refs=outcome.evidence_refs,
+                    closure_condition="该练习通过程序化验收",
+                )
+            )
+            opened += 1
+        return opened
 
     async def _run_wave(
         self, tasks: list[PracticeTask], verifier: Verifier, app_context: dict
@@ -243,7 +272,15 @@ class ExplorationController:
 
         hints: list[dict] = []
         if committed:
-            conflicts = await self._consolidator.detect_conflicts(committed)
+            # I4: 冲突检测必须覆盖库内已有记录（新候选 vs 已发布规则），
+            # 不止波内互查——去重后合并检测集
+            namespaces = {r.namespace for r in committed}
+            existing: list = []
+            for ns in namespaces:
+                existing.extend(await self._store.query(ns, {}))
+            known_ids = {r.id for r in committed}
+            detection_set = committed + [r for r in existing if r.id not in known_ids]
+            conflicts = await self._consolidator.detect_conflicts(detection_set)
             for conflict in conflicts:
                 resolution = await self._consolidator.resolve(conflict)
                 if resolution.action == "dispute":
@@ -301,6 +338,7 @@ class ExplorationController:
             new_outcome = await self._run_practice(produced, verifier, app_context)
             report.tasks_executed += 1
             report.tasks_passed += 1 if new_outcome.status == "passed" else 0
+            report.gaps_opened += await self._record_gaps([produced], [new_outcome])
 
             # 先整合记忆，再出下一题（DRS 的关键顺序）
             _, generated = await self._merge_outcomes([produced], [new_outcome], app_context)

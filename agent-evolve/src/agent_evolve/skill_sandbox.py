@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -47,23 +48,78 @@ class ContractTestReport(BaseModel):
     cases: list[dict]
 
 
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _make_preexec(memory_limit_mb: int | None, cpu_limit_s: bool):
+    """I6: rlimit 资源限制（unix 尽力而为；Windows 退化为无限制）。"""
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    if memory_limit_mb is None and not cpu_limit_s:
+        return None
+
+    def _apply() -> None:
+        try:
+            if memory_limit_mb is not None:
+                lim = memory_limit_mb * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+            if cpu_limit_s:
+                soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+                resource.setrlimit(resource.RLIMIT_CPU, (max(soft, 1), hard))
+        except (ValueError, OSError):  # 平台不支持时降级为不限制
+            pass
+
+    return _apply
+
+
 class SkillSandbox:
-    def __init__(self, base_dir: Path | str = "skill_workspace") -> None:
+    def __init__(
+        self,
+        base_dir: Path | str = "skill_workspace",
+        *,
+        memory_limit_mb: int | None = None,
+        cpu_limit_s: bool = False,
+    ) -> None:
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
+        self._memory_limit_mb = memory_limit_mb
+        self._cpu_limit_s = cpu_limit_s
+
+    @staticmethod
+    def _safe_component(value: str, what: str) -> str:
+        if not _SAFE_ID.match(value):
+            raise ValueError(f"非法 {what}: {value!r}（仅允许 [A-Za-z0-9._-]）")
+        return value
 
     def _materialize(self, artifact: SkillArtifact) -> Path:
-        ws = self._base / artifact.skill_id / artifact.version
+        # C1 防护：skill_id/version 只能是安全单段；文件名/entrypoint 不得绝对路径、
+        # 不得含 ..、必须落在工作区内（resolve + is_relative_to 双保险）
+        self._safe_component(artifact.skill_id, "skill_id")
+        self._safe_component(artifact.version, "version")
+        ws = (self._base / artifact.skill_id / artifact.version).resolve()
         ws.mkdir(parents=True, exist_ok=True)
+
+        def _resolve_under_ws(name: str, what: str) -> Path:
+            candidate = (ws / name).resolve()
+            if candidate == ws or not candidate.is_relative_to(ws):
+                raise ValueError(f"非法 {what}: {name!r}（不得逃出工作区）")
+            return candidate
+
+        for name in artifact.script_files:
+            _resolve_under_ws(name, "文件名")
+        entry = _resolve_under_ws(artifact.entrypoint, "entrypoint")
         for name, content in artifact.script_files.items():
-            (ws / name).write_text(content)
-        return ws / artifact.entrypoint
+            _resolve_under_ws(name, "文件名").write_text(content)
+        return entry
 
     async def run(
         self, artifact: SkillArtifact, args: dict, *, timeout_s: float = 30
     ) -> SkillRunResult:
         entry = self._materialize(artifact)
         t0 = time.monotonic()
+        preexec = _make_preexec(self._memory_limit_mb, self._cpu_limit_s)
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(entry),
@@ -71,6 +127,7 @@ class SkillSandbox:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,  # 独立进程组，便于整组击杀
+            **({"preexec_fn": preexec} if preexec is not None else {}),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)

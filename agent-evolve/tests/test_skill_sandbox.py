@@ -111,3 +111,35 @@ async def test_contract_test_gates_publication(tmp_path) -> None:
     )
     report3 = await sandbox.contract_test(should_fail)
     assert report3.passed is False
+
+
+async def test_workspace_path_traversal_rejected(tmp_path) -> None:
+    """C1: LLM 生成的 skill_id/文件名不得逃出工作区（绝对路径与 ../ 都拒绝）。"""
+    sandbox = SkillSandbox(base_dir=tmp_path / "ws")
+
+    with pytest.raises(ValueError, match="skill_id"):
+        await sandbox.run(_artifact({"main.py": "print(1)"}, skill_id="../escape"), {})
+    with pytest.raises(ValueError, match="version"):
+        await sandbox.run(_artifact({"main.py": "print(1)"}, version="../../v"), {})
+
+    with pytest.raises(ValueError, match="文件名"):
+        await sandbox.run(_artifact({"../../../evil.py": "print(1)"}, skill_id="ok"), {})
+    with pytest.raises(ValueError, match="文件名"):
+        await sandbox.run(_artifact({"/tmp/evil_abs.py": "print(1)"}, skill_id="ok"), {})
+    with pytest.raises(ValueError, match="entrypoint"):
+        await sandbox.run(_artifact({"main.py": "print(1)"}, entrypoint="/tmp/evil.py"), {})
+
+    # 正常技能不受影响
+    result = await sandbox.run(_artifact({"main.py": ECHO_SCRIPT}), {"a": 1})
+    assert result.status == "succeeded"
+
+
+async def test_resource_limits_do_not_break_normal_skills(tmp_path) -> None:
+    """I6: rlimit(内存/CPU) 配置后正常技能照常运行。"""
+    sandbox = SkillSandbox(base_dir=tmp_path / "ws", memory_limit_mb=256, cpu_limit_s=True)
+    result = await sandbox.run(_artifact({"main.py": ECHO_SCRIPT}), {"k": 1}, timeout_s=10)
+    assert result.status == "succeeded"
+    # 内存吞噬脚本：在支持的平台上被 rlimit 掐死或超时击杀，总之不得挂起宿主
+    hog = "x = []\nwhile True:\n    x.append(b'A' * 1024 * 1024)\n"
+    result2 = await sandbox.run(_artifact({"main.py": hog}), {}, timeout_s=3)
+    assert result2.status == "failed"

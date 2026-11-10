@@ -121,6 +121,7 @@ class CurriculumGenerator(Protocol):
         budget: ExplorationBudget | None,
         *,
         shared_memory_snapshot_id: str,
+        practice_pool: list[dict] | None = None,
     ) -> PracticeWavePlan: ...
 
     async def refine_after_result(
@@ -175,7 +176,15 @@ class LLMCurriculumGenerator:
         budget: ExplorationBudget | None,
         *,
         shared_memory_snapshot_id: str,
+        practice_pool: list[dict] | None = None,
     ) -> PracticeWavePlan:
+        pool_hint = ""
+        if practice_pool:
+            ids = ", ".join(t["id"] for t in practice_pool[:20])
+            pool_hint = (
+                f" Practiceable tasks (task ids MUST come from this pool; unknown ids "
+                f"cannot be verified and will fail): {ids}."
+            )
         messages = [
             {
                 "role": "system",
@@ -183,9 +192,9 @@ class LLMCurriculumGenerator:
                     f"You are the curriculum planner for a document-workbench agent "
                     f"(mode={mode}). Design a practice wave. Signals: "
                     f"{json.dumps(view.signals)}. Frontier: "
-                    f"{view.frontier.model_dump()}. Produce ONE PracticeWavePlan JSON: "
-                    "a wave (use the given snapshot id) plus 1-4 tasks; every task MUST "
-                    "carry an acceptance spec."
+                    f"{view.frontier.model_dump()}.{pool_hint} Produce ONE PracticeWavePlan"
+                    " JSON: a wave (use the given snapshot id) plus 1-4 tasks; every task "
+                    "MUST carry an acceptance spec."
                 ),
             },
             {

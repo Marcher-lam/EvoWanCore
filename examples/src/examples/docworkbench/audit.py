@@ -32,7 +32,8 @@ class AuditReport(BaseModel):
     regression_rate: float = 0.0  # 由演化轨道(T15)的 regression_violations 汇总，此处占位
 
 
-def _matches_truth(statement: str) -> bool:
+def statement_matches_truth(statement: str) -> bool:
+    """陈述是否与 HIDDEN_CONSTRAINTS 真值一致（发布门 + 审计共用）。"""
     s = statement.lower()
     return any(all(k in s for k in keywords) for keywords in _TRUTH_KEYWORDS.values())
 
@@ -48,7 +49,7 @@ async def audit_promoted(
     wrong: list[str] = []
     for r in promoted:
         statement = str(r.content.get("statement", ""))
-        ok = _matches_truth(statement)
+        ok = statement_matches_truth(statement)
         if ok and reviewer is not None:
             ok = reviewer(statement)  # 强模型复核可推翻确定性匹配
         if not ok:

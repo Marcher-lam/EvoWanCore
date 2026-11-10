@@ -133,3 +133,17 @@ def test_budget_meter_and_stop() -> None:
 def test_budget_unlimited_dim_never_exhausts() -> None:
     meter = BudgetMeter(ExplorationBudget())  # 全部 None = 不限
     assert meter.consume(tokens=10**9, actions=10**6, cost=999.0).exhausted is False
+
+
+async def test_plan_wave_receives_practice_pool() -> None:
+    """I2: 课程提示必须携带可练习任务池，真模型才能出语料内任务。"""
+    gen, fake = _generator([InferResponse(text=_valid_plan_json())])
+    pool = [
+        {"id": "convert_doc_3_3", "dimension": "convert", "doc_id": "doc_3", "goal": "无损转换"},
+        {"id": "extract_doc_1_1", "dimension": "extract", "doc_id": "doc_1", "goal": "抽取字段"},
+    ]
+    await gen.plan_wave(_view(), mode="broad", budget=None,
+                        shared_memory_snapshot_id="snap_9", practice_pool=pool)
+    content = " ".join(m["content"] for m in fake.recorded_requests[0].messages)
+    assert "convert_doc_3_3" in content
+    assert "extract_doc_1_1" in content

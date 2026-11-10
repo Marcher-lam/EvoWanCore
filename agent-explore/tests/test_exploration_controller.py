@@ -227,10 +227,11 @@ async def test_conflict_becomes_contrast_task_next_wave(tmp_path: Path) -> None:
     )
     await env.run(mode="broad")
 
-    # 同条件反结论 → 双双 DISPUTED（不覆盖）；第二波 contrast 任务产出第三条候选
+    # 同条件反结论 → DISPUTED（不覆盖）。I4 修复后：第二波 contrast 任务的结论
+    # （True）与已存规则乙（False）同主题反结论，也必须被抓 → 3 条全部 DISPUTED
     rules = await env.memory_store.query(NS_RULES, {})
     disputed = [r for r in rules if r.verification is VerificationState.DISPUTED]
-    assert len(disputed) == 2
+    assert len(disputed) == 3
     assert len(rules) == 3
     # 冲突提示进入下一波课程输入
     assert any(
@@ -294,3 +295,67 @@ async def test_report_accounts_budget(tmp_path: Path) -> None:
     report = await env.run(mode="broad", max_waves=1)
     assert report.budget_spent.get("actions", 0) >= 1
     assert report.gaps_opened == 0
+
+
+async def test_new_candidate_conflicts_with_published_rule(tmp_path: Path) -> None:
+    """I4 回归：新候选与已发布规则同条件反结论 → 双双 DISPUTED（不共存）。"""
+    # 预先存在一条已发布规则：主题 T，结论 True
+    from agent_core.memory.record import (
+        MemoryKind,
+        MemoryRecord,
+        VerificationState,
+    )
+
+    published = MemoryRecord(
+        kind=MemoryKind.RULE,
+        namespace=NS_RULES,
+        content={"subject": "主题T", "conclusion": True, "claims": [], "evidence_checked": []},
+        applicability={"app": "workbench"},
+        evidence_refs=["evi_pre"],
+        verification=VerificationState.VERIFIED,
+    )
+
+    plan = _wave_plan_json("x", [_task_json("variant", "新观察")])
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text=plan), InferResponse(text="ok")],
+        # reflector 产出同条件、同主题、反结论的候选
+        reflector=lambda task, outcome: [
+            {
+                "kind": "rule",
+                "content": {"subject": "主题T", "conclusion": False,
+                            "claims": [], "evidence_checked": []},
+                "applicability": {"app": "workbench"},
+                "evidence_refs": ["evi_new"],
+            }
+        ],
+    )
+    await env.memory_store.put(published)
+    await env.run(mode="broad", max_waves=1)
+
+    rules = await env.memory_store.query(NS_RULES, {})
+    by_subject_t = [r for r in rules if r.content.get("subject") == "主题T"]
+    assert len(by_subject_t) == 2
+    assert all(r.verification is VerificationState.DISPUTED for r in by_subject_t), (
+        "新旧反结论不得共存，必须双双 DISPUTED"
+    )
+
+
+async def test_failed_practice_opens_gap(tmp_path: Path) -> None:
+    """I5 回归：失败的练习必须记入 GapLedger（gap-driven 闭环的输入）。"""
+    from agent_explore.gaps import GapType
+
+    plan = _wave_plan_json("x", [_task_json("prerequisite", "会失败的任务")])
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text=plan), InferResponse(text="ok")],
+        verifier=StubVerifier(fail_for={"会失败的任务"}),
+        reflector=lambda task, outcome: [],
+    )
+    report = await env.run(mode="broad", max_waves=1)
+    assert report.tasks_passed == 0
+    assert report.gaps_opened == 1
+    gaps = await env.gap_ledger.open_gaps({})
+    assert len(gaps) == 1
+    assert gaps[0].gap_type is GapType.KNOWLEDGE
+    assert "会失败的任务" in gaps[0].title

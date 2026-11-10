@@ -82,3 +82,26 @@ def test_assembler_respects_budget() -> None:
 
 def test_assembler_empty_records() -> None:
     assert TokenBudgetAssembler().assemble([], token_budget=100) == ""
+
+
+async def test_invalidated_rule_not_retrieved(store: SqliteMemoryStore) -> None:
+    """I3 回归：失效(EXPIRED/SUPERSEDED)的已验证规则不得进入执行上下文。"""
+    from agent_core.memory.record import LifecycleState, lifecycle_transition
+
+    verified = await _verified(store, _rule("已失效的规则"))
+    await store.put(lifecycle_transition(verified, LifecycleState.EXPIRED))
+
+    retriever = SimpleRetriever(store)
+    got = await retriever.retrieve(
+        scope={"namespaces": [NS_RULES]},
+        task_context={"environment_version": "1.0", "keywords": ["失效"]},
+        limit=5,
+    )
+    assert got == [], "失效规则不得被召回"
+
+    # 活跃规则不受影响
+    fresh = await _verified(store, _rule("活跃规则"))
+    got2 = await retriever.retrieve(
+        scope={"namespaces": [NS_RULES]}, task_context={"environment_version": "1.0"}, limit=5
+    )
+    assert [r.id for r in got2] == [fresh.id]

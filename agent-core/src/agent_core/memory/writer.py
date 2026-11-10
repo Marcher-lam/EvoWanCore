@@ -154,7 +154,10 @@ class DefaultConsolidator:
                 note="适用条件不同，拆分保留",
             )
         # 条件相同结论相反：双双 DISPUTED，触发 contrast 练习，禁止覆盖
+        # （幂等：已 DISPUTED 的记录重复进入冲突集时不再转移）
         for rec in (a, b):
+            if rec.verification is VerificationState.DISPUTED:
+                continue
             disputed = verify_transition(rec, VerificationState.DISPUTED)
             await self._store.put(disputed)
         return ConflictResolution(
@@ -175,6 +178,10 @@ class MemoryPublisher(Protocol):
     async def invalidate(self, record_id: str, reason: str) -> None: ...
 
 
+class PublishRefused(Exception):
+    """验收报告未通过，发布被拒绝。"""
+
+
 class VersionedPublisher:
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
@@ -183,6 +190,8 @@ class VersionedPublisher:
         record = await self._store.get(record_id)
         if record is None:
             raise KeyError(f"memory {record_id} 不存在")
+        if verifier_report.get("passed") is False:
+            raise PublishRefused("验收报告未通过：候选记忆不得晋级 VERIFIED")
         verified = verify_transition(record, VerificationState.VERIFIED, evidence_ok=True)
         with_report = verified.model_copy(
             update={"content": {**verified.content, "verification_report": verifier_report}}

@@ -145,15 +145,24 @@ class DocumentAgentApp:
                 "agent": self._agent,
                 "reflector": self._reflector,
                 "environment_version": ENV_VERSION,
+                "practice_pool": self._practice_pool(),
             },
         )
         # 探索产出的候选经验：验证通过后发布（对 solve 生效）
         await self._publish_candidates()
         return report
 
+    def _practice_pool(self) -> list[dict]:
+        ids = self.practice_task_ids
+        return [
+            {"id": t["id"], "dimension": t["dimension"], "doc_id": t["doc_id"], "goal": t["goal"]}
+            for t in self._corpus.tasks
+            if t["id"] in ids
+        ]
+
     async def _reflector(self, task, outcome):
-        if outcome.status != "passed":
-            return []
+        if outcome.status != "passed" or not outcome.evidence_refs:
+            return []  # 无真实证据引用：不产生记忆（宁可不学，不可编造）
         dim = task.id.split("_", 1)[0]
         statement = {
             "export": "xlsx 导出含图表扫描页前必须 convert_format(dpi=200)，否则丢页",
@@ -170,17 +179,32 @@ class DocumentAgentApp:
                     "evidence_checked": ["constraint_learned"],
                 },
                 "applicability": {"app": "workbench", "env_version": ENV_VERSION},
-                "evidence_refs": outcome.evidence_refs or ["evi_explore"],
+                "evidence_refs": outcome.evidence_refs,
             }
         ]
 
     async def _publish_candidates(self) -> None:
+        """发布门：陈述须与工作台真值一致（环境级验收），否则保持 CANDIDATE。"""
+        from examples.docworkbench.audit import statement_matches_truth
+
         rules = await self._memory_store.query("rules", {})
         for r in rules:
-            if r.verification.value == "candidate" and r.evidence_refs:
+            if r.verification.value != "candidate" or not r.evidence_refs:
+                continue
+            statement = str(r.content.get("statement", ""))
+            gate_ok = statement_matches_truth(statement)
+            try:
                 await self._publisher.publish(
-                    r.id, verifier_report={"source": "exploration", "app": "workbench"}
+                    r.id,
+                    verifier_report={
+                        "source": "exploration",
+                        "app": "workbench",
+                        "passed": gate_ok,
+                        "checks": [{"check": "statement_matches_truth", "ok": gate_ok}],
+                    },
                 )
+            except Exception:
+                pass  # 发布被拒：保持 CANDIDATE，等待反例/复审
 
 
 def _bind_tools(
