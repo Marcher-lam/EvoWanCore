@@ -143,3 +143,20 @@ async def test_resource_limits_do_not_break_normal_skills(tmp_path) -> None:
     hog = "x = []\nwhile True:\n    x.append(b'A' * 1024 * 1024)\n"
     result2 = await sandbox.run(_artifact({"main.py": hog}), {}, timeout_s=3)
     assert result2.status == "failed"
+
+
+async def test_empty_contract_fails(tmp_path) -> None:
+    """M10：expected_outputs 与 failure_scenarios 皆空 → 不得 vacuous pass。"""
+    from agent_evolve.skill_sandbox import SkillArtifact, SkillSandbox
+
+    sandbox = SkillSandbox(tmp_path / "ws")
+    artifact = SkillArtifact(
+        skill_id="s_empty",
+        version="1",
+        entrypoint="main.py",
+        script_files={"main.py": "print('hi')"},
+        expected_outputs={},
+        known_failure_scenarios=[],
+    )
+    report = await sandbox.contract_test(artifact)
+    assert report.passed is False, "空契约必须 fail（无验收即无发布资格）"

@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import statistics
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
-from agent_core.memory.store import MemoryStore
+from agent_core.events import new_event
+from agent_core.memory.record import MemoryKind, MemoryRecord
+from agent_core.memory.store import NS_RELEASES, MemoryStore
 from agent_core.memory.writer import MemoryPublisher
 from agent_core.task import TaskSpec
 from pydantic import BaseModel, Field
@@ -54,20 +60,64 @@ class PublishDenied(Exception):
     """候选未过发布门槛。"""
 
 
+_STATE_DDL = (
+    "CREATE TABLE IF NOT EXISTS evolution_state ("
+    " kind TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,"
+    " PRIMARY KEY (kind, id))"
+)
+
+
 class EvolutionController:
     def __init__(
         self,
         *,
         memory_store: MemoryStore,
         memory_publisher: MemoryPublisher,
+        db_path: Path | None = None,
+        event_log=None,
     ) -> None:
         self._memory_store = memory_store
         self._memory_publisher = memory_publisher
         self._candidates: dict[str, ExperienceCandidate] = {}
         self._manifests: dict[str, ReleaseManifest] = {}
+        self._db_path = Path(db_path) if db_path is not None else None
+        self._event_log = event_log
+        if self._db_path is not None:
+            self._load_state()
+
+    # ---------- M10：演化态持久化（candidates/manifests 落 SQLite） ----------
+
+    def _load_state(self) -> None:
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
+            conn.execute(_STATE_DDL)
+            rows = conn.execute("SELECT kind, id, payload FROM evolution_state").fetchall()
+        for kind, obj_id, payload in rows:
+            if kind == "candidate":
+                self._candidates[obj_id] = ExperienceCandidate(**json.loads(payload))
+            elif kind == "manifest":
+                self._manifests[obj_id] = ReleaseManifest(**json.loads(payload))
+
+    def _persist(self, kind: str, obj_id: str, payload: dict) -> None:
+        if self._db_path is None:
+            return
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
+            conn.execute(_STATE_DDL)
+            conn.execute(
+                "INSERT OR REPLACE INTO evolution_state (kind, id, payload) VALUES (?, ?, ?)",
+                (kind, obj_id, json.dumps(payload, ensure_ascii=False)),
+            )
+
+    async def _deny(self, candidate_id: str, reason: str) -> None:
+        """拒绝发布：写 PublishDenied 事件（可选注入 EventLog）后抛错。"""
+        if self._event_log is not None:
+            await self._event_log.append(
+                new_event("PublishDenied", "release", candidate_id, reason=reason)
+            )
+        raise PublishDenied(reason)
 
     def submit(self, candidate: ExperienceCandidate) -> str:
         self._candidates[candidate.id] = candidate
+        self._persist("candidate", candidate.id, candidate.model_dump())
         return candidate.id
 
     async def evaluate(
@@ -109,11 +159,12 @@ class EvolutionController:
         if candidate_id not in self._candidates:
             raise KeyError(f"candidate {candidate_id} 不存在")
         if not report.improved:
-            raise PublishDenied("未达发布门槛: improved=False（候选未优于父版本）")
+            await self._deny(candidate_id, "未达发布门槛: improved=False（候选未优于父版本）")
         if report.regression_violations:
-            raise PublishDenied(
+            await self._deny(
+                candidate_id,
                 f"未达发布门槛: regression 回归 {report.regression_violations}"
-                "（新知识不得破坏旧能力）"
+                "（新知识不得破坏旧能力）",
             )
         manifest = ReleaseManifest(
             models=models or {},
@@ -122,6 +173,21 @@ class EvolutionController:
             candidates=[candidate_id],
         )
         self._manifests[manifest.release_id] = manifest
+        self._persist("manifest", manifest.release_id, manifest.model_dump())
+        # M10：发布写入 NS_RELEASES 记录（审计可查，跨实例存活）
+        await self._memory_store.put(
+            MemoryRecord(
+                id=manifest.release_id,
+                kind=MemoryKind.RULE,
+                namespace=NS_RELEASES,
+                content={
+                    "release_id": manifest.release_id,
+                    "candidates": manifest.candidates,
+                    "memory_snapshot_id": manifest.memory_snapshot_id,
+                    "created_at": manifest.created_at,
+                },
+            )
+        )
         return manifest
 
     async def rollback(self, release_id: str, *, reason: str) -> ReleaseManifest:
@@ -141,4 +207,5 @@ class EvolutionController:
             note=f"rollback: {reason}",
         )
         self._manifests[inverse.release_id] = inverse
+        self._persist("manifest", inverse.release_id, inverse.model_dump())
         return inverse

@@ -194,4 +194,7 @@ class SkillSandbox:
                 {"name": name, "kind": "failure_scenario", "ok": ok, "status": result.status}
             )
 
+        # M10：expected_outputs 与 failure_scenarios 皆空 → 不得 vacuous pass
+        if not cases:
+            cases.append({"name": "_empty_contract", "kind": "vacuous_guard", "ok": False})
         return ContractTestReport(passed=all(c["ok"] for c in cases), cases=cases)
