@@ -108,10 +108,11 @@ class LLMReflector:
                     "verify behaviorally. Each rule MUST carry a structured claim: "
                     '{"dimension": one of export|extract|convert|validate, "action": '
                     'one of the tool names above, "params": the decisive parameter '
-                    "values} — plus a human-readable statement. Generic process wisdom "
-                    "(e.g. 'verify afterwards', 'check the format') is NOT acceptable. "
-                    "An empty proposals list is acceptable when the trace supports no "
-                    "causal rule."
+                    'values, all CONCRETE (numbers/enums like 200 or "left") — never '
+                    "descriptive text} — plus a human-readable statement. Generic "
+                    "process wisdom (e.g. 'verify afterwards', 'check the format') is "
+                    "NOT acceptable. An empty proposals list is acceptable when the "
+                    "trace supports no causal rule."
                 ),
             },
             {

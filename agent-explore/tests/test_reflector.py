@@ -156,3 +156,11 @@ async def test_reflector_prompt_grounded_and_names_preprocessing() -> None:
     assert "convert_format" in prompt and "scan" in prompt.lower(), (
         "须提示扫描件读错时的预处理杠杆（convert_format dpi）"
     )
+
+
+async def test_reflector_prompt_demands_concrete_params() -> None:
+    """T23 迭代 2：claim.params 必须是具体值（数字/枚举），不得是描述性文字。"""
+    gw, fake = _gateway([InferResponse(text='{"proposals": []}')])
+    await LLMReflector(gateway=gw, model_id="m-r")(_Task(), _OutcomeWithTrace())
+    prompt = fake.recorded_requests[0].messages[0]["content"]
+    assert "concrete" in prompt.lower(), "提示须要求 params 为具体值"

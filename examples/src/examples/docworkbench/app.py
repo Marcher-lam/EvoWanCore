@@ -223,6 +223,23 @@ class DocumentAgentApp:
             }
         ]
 
+    def _trap_depth(self, task: dict) -> int:
+        """T23：任务文档的陷阱深度——extract=低对比度页数；export=图表扫描页；
+        convert=扫描件。门任务优先带陷阱的文档，规则才可被行为验证。"""
+        doc = next(
+            (d for d in self._corpus.documents if d["id"] == task["doc_id"]), None
+        )
+        if doc is None:
+            return 0
+        dim = task["dimension"]
+        if dim == "extract":
+            return sum(1 for p in doc["pages"] if p.get("contrast", 1.0) < 0.5)
+        if dim == "export":
+            return 1 if doc.get("has_chart_page") else 0
+        if dim == "convert":
+            return 1 if doc.get("kind") == "scan" else 0
+        return 0
+
     def _gate_tasks(
         self,
         practice_ids: set[str],
@@ -241,7 +258,9 @@ class DocumentAgentApp:
         if exclude:
             selected = [t for t in pool if t["dimension"] != dimension][:limit]
         else:
-            selected = [t for t in pool if t["dimension"] == dimension][:limit]
+            same_dim = [t for t in pool if t["dimension"] == dimension]
+            # T23：优先陷阱文档（规则只有在能区分对错的题上才可被验证）
+            selected = sorted(same_dim, key=lambda t: -self._trap_depth(t))[:limit]
         leaked = {t["id"] for t in selected} & set(heldout_ids)
         if leaked:
             raise ValueError(f"评测门吃到保留集任务（红线）: {sorted(leaked)}")

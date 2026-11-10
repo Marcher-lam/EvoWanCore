@@ -351,3 +351,24 @@ async def test_gate_never_uses_heldout(tmp_path: Path, corpus) -> None:
     poisoned = {t["id"] for t in heldout.tasks} | app.practice_task_ids  # 模拟污染
     with pytest.raises(ValueError, match="保留集"):
         app._gate_tasks(app.practice_task_ids, poisoned, dimension="convert")  # noqa: SLF001
+
+
+async def test_gate_prefers_trap_tasks(tmp_path: Path, corpus) -> None:
+    """T23 迭代：门 mini-batch 优先选带陷阱的文档（extract=低对比度扫描页）——
+    规则只有在能区分对错的题上才可被验证。"""
+    hard_corpus = generate_corpus(seed=5, size=12, difficulty=0.8)  # 感知陷阱存在
+    practice, _heldout = split_corpus(hard_corpus, practice_ratio=0.5)
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    app = build_app(
+        model_adapter=fake, db_path=tmp_path / "trap.db", blob_dir=tmp_path / "tb",
+        corpus=hard_corpus, practice_part=practice,
+    )
+    tasks = app._gate_tasks(app.practice_task_ids, set(), dimension="extract", limit=3)  # noqa: SLF001
+    assert tasks, "extract 维度应有门任务"
+    by_id = {t["id"]: t for t in hard_corpus.tasks}
+    docs = {d["id"]: d for d in hard_corpus.documents}
+    first_trap = any(
+        any(p.get("contrast", 1.0) < 0.5 for p in docs[by_id[t.id]["doc_id"]]["pages"])
+        for t in tasks
+    )
+    assert first_trap, "mini-batch 应含低对比度陷阱文档（可区分对错）"
