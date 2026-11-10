@@ -38,6 +38,7 @@ testpaths = [
     "agent-adapters/tests",
     "agent-devtools/tests",
     "examples/tests",
+    "tests_acceptance",
 ]
 
 [tool.ruff]

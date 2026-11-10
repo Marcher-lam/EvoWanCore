@@ -46,13 +46,58 @@ class ExperimentReport(BaseModel):
     comparable: bool = False
 
 
-def _default_adapter(seed: int) -> ModelAdapter:
-    from agent_core.models import FakeModelAdapter, InferResponse, Modality, ModelCapabilities
+class _DefaultAdapter:
+    """默认适配器：课程请求返回单练习任务波次，其余交白卷。"""
 
-    return FakeModelAdapter(
-        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}),
-        [InferResponse(text="no script")],
-    )
+    def __init__(self, plan_task_id: str) -> None:
+        self._plan_task_id = plan_task_id
+
+    def capabilities(self):
+        from agent_core.models import Modality, ModelCapabilities
+
+        return ModelCapabilities(model_id="m-app", inputs={Modality.TEXT})
+
+    async def infer(self, request):
+        import json as _json
+
+        from agent_core.models import InferResponse
+
+        if request.structured_output is not None:
+            return InferResponse(
+                text=_json.dumps(
+                    {
+                        "wave": {
+                            "shared_memory_snapshot_id": "x",
+                            "task_ids": [],
+                            "parallelism": 1,
+                        },
+                        "tasks": [
+                            {
+                                "id": self._plan_task_id,
+                                "family": "prerequisite",
+                                "title": "练习",
+                                "objective": {},
+                                "acceptance": {
+                                    "verifier_profile": "p",
+                                    "required_evidence": [],
+                                    "pass_conditions": [],
+                                    "fail_conditions": [],
+                                },
+                            }
+                        ],
+                    }
+                )
+            )
+        return InferResponse(text="no script")
+
+
+def _default_adapter_factory(corpus_factory, practice_ratio: float):
+    def factory(seed: int) -> ModelAdapter:
+        corpus = corpus_factory(seed)
+        tasks = corpus.tasks
+        return _DefaultAdapter(plan_task_id=tasks[0]["id"])
+
+    return factory
 
 
 async def _eval_heldout(app, heldout) -> list[float]:
@@ -88,7 +133,10 @@ def _arm_stats(
 async def _explore_arm(config: ExperimentConfig, seed: int, corpus, practice, heldout) -> ArmReport:
     workdir = (config.workdir or Path(".")) / f"seed{seed}" / "explore"
     workdir.mkdir(parents=True, exist_ok=True)
-    adapter = (config.adapter_factory or _default_adapter)(seed)
+    adapter_factory = config.adapter_factory or _default_adapter_factory(
+        config.corpus_factory, config.practice_ratio
+    )
+    adapter = adapter_factory(seed)
     app = build_app(
         model_adapter=adapter,
         db_path=workdir / "app.db",
@@ -110,7 +158,10 @@ async def _retry_arm(config: ExperimentConfig, seed: int, corpus, practice, held
 
     workdir = (config.workdir or Path(".")) / f"seed{seed}" / "retry"
     workdir.mkdir(parents=True, exist_ok=True)
-    adapter = (config.adapter_factory or _default_adapter)(seed)
+    adapter_factory = config.adapter_factory or _default_adapter_factory(
+        config.corpus_factory, config.practice_ratio
+    )
+    adapter = adapter_factory(seed)
     app = build_app(
         model_adapter=adapter,
         db_path=workdir / "app.db",

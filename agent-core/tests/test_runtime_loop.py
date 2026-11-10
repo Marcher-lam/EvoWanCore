@@ -250,6 +250,15 @@ async def test_resume_does_not_refire_dispatched_actions(tmp_path: Path) -> None
             break
     assert run_id
 
+    # 等检查点落盘（崩溃场景 = 派发已记录、回执未回）再取消，避免竞态
+    checkpoint = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        checkpoint = await env.state_store.load_latest_checkpoint(run_id)
+        if checkpoint and checkpoint.get("pending"):
+            break
+    assert checkpoint and checkpoint["pending"], "派发后的检查点必须包含 pending 动作"
+
     # 模拟崩溃：直接取消 submit 任务（进程死掉，回执丢失）
     submit_task.cancel()
     with pytest.raises(asyncio.CancelledError):
