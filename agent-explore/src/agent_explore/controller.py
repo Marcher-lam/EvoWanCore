@@ -62,6 +62,25 @@ class ExplorationReport(BaseModel):
     conflict_hints: list[dict] = []
 
 
+class _CallCursor:
+    """对 CountingAdapter.calls 取增量（V2 §6.2 真实调用计量，替换 V1 占位计数）。
+
+    app_context["model_counter"] 缺席（未接线计数适配器）时增量为 0——
+    tokens 维度不计量，actions 维度不受影响。
+    """
+
+    def __init__(self, counter) -> None:
+        self._counter = counter
+        self._last = counter.calls if counter is not None else 0
+
+    def take(self) -> int:
+        if self._counter is None:
+            return 0
+        delta = self._counter.calls - self._last
+        self._last = self._counter.calls
+        return delta
+
+
 def _diagnose(outcome: PracticeOutcome) -> dict:
     if outcome.status == "error":
         return {"type": "verification_gap", "note": outcome.error or "执行异常"}
@@ -124,6 +143,7 @@ class ExplorationController:
         hints: list[dict],
     ) -> None:
         max_waves = policy.max_waves or 2
+        cursor = _CallCursor(app_context.get("model_counter"))
         for wave_n in range(max_waves):
             view = await self._assembler.assemble(
                 mode="broad",
@@ -162,10 +182,8 @@ class ExplorationController:
             report.conflict_hints = list(hints)
             report.candidates_generated += generated
 
-            meter.consume(
-                actions=len(plan.tasks),
-                tokens=sum(1 for _ in plan.tasks),  # V1 粗估：占位计数
-            )
+            # 真实调用计量（§6.2）：本波 should_stop/plan/practice 的全部模型调用
+            meter.consume(actions=len(plan.tasks), tokens=cursor.take())
             if meter.status.exhausted:
                 break
 
@@ -334,6 +352,7 @@ class ExplorationController:
             family=TaskFamily.TARGET_ATTEMPT.value,
             status="failed",
         )
+        cursor = _CallCursor(app_context.get("model_counter"))
         for _step in range(app_context.get("policy_max_deep", 3)):
             view = await self._assembler.assemble(
                 mode="deep",
@@ -362,7 +381,7 @@ class ExplorationController:
             _, generated = await self._merge_outcomes([produced], [new_outcome], app_context)
             report.candidates_generated += generated
 
-            meter.consume(actions=1, tokens=1)
+            meter.consume(actions=1, tokens=cursor.take())
             prev_task = {
                 "id": produced.id,
                 "family": produced.family.value,

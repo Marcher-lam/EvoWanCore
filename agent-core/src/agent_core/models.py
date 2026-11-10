@@ -196,3 +196,25 @@ class FakeModelAdapter:
         if not self._responses:
             raise AssertionError("脚本耗尽：FakeModelAdapter 没有更多响应")
         return self._responses.pop(0)
+
+
+class CountingAdapter:
+    """计量装饰器（V2 §6.2）：包装物理适配器，计数真实模型调用与 token。
+
+    纯被动计数——不参与路由决策；预算口径 = calls（真实调用），
+    total_tokens 按 InferResponse.usage["total_tokens"] 累计（缺失记 0）。
+    """
+
+    def __init__(self, inner: ModelAdapter) -> None:
+        self._inner = inner
+        self.calls: int = 0
+        self.total_tokens: int = 0
+
+    def capabilities(self) -> ModelCapabilities:
+        return self._inner.capabilities()
+
+    async def infer(self, request: InferRequest) -> InferResponse:
+        resp = await self._inner.infer(request)
+        self.calls += 1
+        self.total_tokens += int(resp.usage.get("total_tokens", 0) or 0)
+        return resp

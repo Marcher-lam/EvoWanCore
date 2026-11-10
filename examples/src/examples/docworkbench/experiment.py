@@ -199,13 +199,20 @@ async def _retry_arm(
         practice_part=practice,
     )
     meter = BudgetMeter(config.budget_w)
+    counter = app.model_counter  # §6.2：重试臂计真实 solve 调用
+    last_calls = counter.calls if counter else 0
     attempts = 0
     i = 0
     practice_tasks = practice.tasks or corpus.tasks
     while not meter.status.exhausted:
         task = practice_tasks[i % len(practice_tasks)]
         await app.solve(task)  # 直接重试：不写长期记忆（app 只在 explore 时写入）
-        meter.consume(actions=1, tokens=1)
+        meter.consume(
+            actions=1,
+            tokens=(counter.calls - last_calls) if counter else 0,
+        )
+        if counter:
+            last_calls = counter.calls
         attempts += 1
         i += 1
         if attempts > 1000:  # 安全阀

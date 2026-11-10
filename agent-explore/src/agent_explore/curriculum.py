@@ -112,6 +112,11 @@ class BudgetMeter:
     def status(self) -> BudgetStatus:
         return self.consume()
 
+    @property
+    def exhausted(self) -> bool:
+        """与 AgentRuntime budget_gate 鸭型兼容（真实调用计数口径同样适用）。"""
+        return self.status.exhausted
+
 
 class CurriculumGenerator(Protocol):
     async def plan_wave(

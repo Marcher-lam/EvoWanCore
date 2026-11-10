@@ -95,6 +95,7 @@ class DocumentAgentApp:
         evidence: SqliteEvidenceStore,
         practice_part: CorpusPart | None,
         derived: dict[str, dict],
+        model_counter=None,
     ) -> None:
         self._gateway = gateway
         self._runtime = runtime
@@ -106,7 +107,13 @@ class DocumentAgentApp:
         self._evidence = evidence
         self._derived = derived
         self._practice_part = practice_part
+        self._model_counter = model_counter
         self._agent = AgentSpec(id="doc_agent", role="document worker", model_id="m-app")
+
+    @property
+    def model_counter(self):
+        """真实调用计数器（CountingAdapter）——实验两臂的统一预算口径（§6.2）。"""
+        return self._model_counter
 
     @property
     def practice_task_ids(self) -> set[str]:
@@ -146,6 +153,7 @@ class DocumentAgentApp:
                 "reflector": self._reflector,
                 "environment_version": ENV_VERSION,
                 "practice_pool": self._practice_pool(),
+                "model_counter": self._model_counter,
             },
         )
         # 探索产出的候选经验：验证通过后发布（对 solve 生效）
@@ -263,10 +271,12 @@ def build_app(
     corpus: Corpus,
     practice_part: CorpusPart | None = None,
 ) -> DocumentAgentApp:
-    from agent_core.models import ModelGateway
+    from agent_core.models import CountingAdapter, ModelGateway
 
+    # V2 §6.2：物理适配器包计数层——gateway 上的一切调用（solve/课程/reflector）都被计量
+    model_counter = CountingAdapter(model_adapter)
     gateway = ModelGateway()
-    gateway.register(model_adapter)
+    gateway.register(model_counter)
 
     registry = InMemoryCapabilityRegistry()
     derived: dict[str, dict] = {}
@@ -316,4 +326,5 @@ def build_app(
         evidence=evidence,
         practice_part=practice_part,
         derived=derived,
+        model_counter=model_counter,
     )

@@ -49,6 +49,7 @@ class AgentRuntime:
         context_assembler=None,
         memory_token_budget: int = 400,
         environment_version: str = "unspecified",
+        budget_meter=None,
     ) -> None:
         self._gateway = gateway
         self._registry = registry
@@ -67,6 +68,7 @@ class AgentRuntime:
         self._context_assembler = context_assembler
         self._memory_token_budget = memory_token_budget
         self._environment_version = environment_version
+        self._budget_meter = budget_meter  # 鸭型：consume(**kw) / exhausted: bool
 
     # ---------- 事件与状态助手 ----------
 
@@ -156,10 +158,34 @@ class AgentRuntime:
                 if outcome == "cancelled":
                     stop = True
                     break
+                if self._budget_meter is not None:
+                    self._budget_meter.consume(actions=1)
+                    if self._budget_meter.exhausted:
+                        stop = True
+                        break
             if stop or policy.should_yield(run, context):
                 break
 
+        if self._budget_meter is not None and self._budget_meter.exhausted:
+            return await self._fail_budget_exhausted(run)
         return await self.verify_and_finish(run.id)
+
+    async def _fail_budget_exhausted(self, run: RunHandle) -> RunHandle:
+        """预算耗尽 → FAILED(reason=budget)，跳过验证（取消优先守卫与 M7 一致）。"""
+        run = await self._store.load_run(run.id) or run
+        if run.state in {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}:
+            return run
+        if run.state is RunState.CANCELLING:
+            old = run.state
+            run = run_transition(run, RunState.CANCELLED)
+            return await self._save(run, old, run.state)
+        old = run.state
+        run = run_transition(run, RunState.FAILED)
+        await self._save(run, old, run.state)
+        await self._emit(
+            run, new_event("RunBudgetExhausted", "run", run.id, reason="budget")
+        )
+        return run
 
     async def _execute_action(self, run: RunHandle, action: ActionRequest, context: dict) -> str:
         proposed = new_event(

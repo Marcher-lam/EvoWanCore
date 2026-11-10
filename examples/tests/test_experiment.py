@@ -87,7 +87,11 @@ async def test_two_arms_equal_budget(tmp_path: Path) -> None:
     retry_spent = report.arms["retry"].budget_spent
     n_seeds = 2
     assert explore_spent["actions"] == retry_spent["actions"] == 4 * n_seeds  # 每种子 4
-    assert explore_spent["tokens"] == retry_spent["tokens"]
+    # V2 §6.2 真实调用计数：action 门预算下两臂各自计量真实调用（非等量断言）；
+    # 探索臂含课程规划开销 ≥ 重试臂（纯 solve 调用）。comparable 的调用口径 = T16。
+    assert retry_spent["tokens"] == 4 * n_seeds  # 每次 solve 恰 1 次模型调用
+    assert explore_spent["tokens"] == 8 * n_seeds  # 每波 plan+practice 各 1 次
+    assert explore_spent["tokens"] >= retry_spent["tokens"] > 0
 
 
 async def test_report_has_mean_and_variance_per_group(tmp_path: Path) -> None:
