@@ -36,26 +36,38 @@ class AuditReport(BaseModel):
     regression_rate: float = 0.0  # 由演化轨道(T15)的 regression_violations 汇总，此处占位
 
 
+def _op_ok(op: str, value: object, expected: object) -> bool:
+    if op == ">=":
+        return value >= expected
+    if op == "==":
+        return value == expected
+    if op == "!=":
+        return value != expected
+    return False
+
+
 def _claim_satisfies(claim: dict) -> bool:
-    """结构化声明对照约束表 claim 键（V2 §6.3 机器可判）。"""
+    """结构化声明对照约束表 claim 键（V2 §6.3 机器可判）。
+
+    两级匹配：(a) 同动作直配；(b) 嵌入参数——管线式 claim（如 export 前置
+    convert）常把决定性参数编码进自身参数名（preceded_by_convert_dpi: 200），
+    只要参数名含约束参数名且值满足算子即认可（真策略）。
+    """
     action = claim.get("action")
     params = claim.get("params") or {}
     for constraint in HIDDEN_CONSTRAINTS:
         spec = constraint.get("claim")
-        if not spec or spec["action"] != action:
+        if not spec:
             continue
-        if spec["param"] not in params:
+        param, op, expected = spec["param"], spec["op"], spec["value"]
+        if spec["action"] == action and param in params:
+            if _op_ok(op, params[param], expected):
+                return True
             continue
-        value = params[spec["param"]]
-        expected = spec["value"]
-        if spec["op"] == ">=":
-            ok = value >= expected
-        elif spec["op"] == "==":
-            ok = value == expected
-        else:
-            ok = False
-        if ok:
-            return True
+        # 嵌入参数：参数名携带约束参数语义（如 *_dpi），跨动作认可真策略
+        for name, value in params.items():
+            if param in name and _op_ok(op, value, expected):
+                return True
     return False
 
 

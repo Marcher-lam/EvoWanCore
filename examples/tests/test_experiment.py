@@ -281,3 +281,32 @@ async def test_audit_reviewer_overrides(tmp_path: Path) -> None:
     report = await audit_promoted(store, reviewer=reviewer)
     assert report.total == 1
     assert report.error_count == 1, "gateway 复核否定应推翻确定性匹配"
+
+
+def test_audit_accepts_true_alternative_strategies() -> None:
+    """T23 迭代 6：审计接受真值上成立的替代策略——(a) 非 xlsx 导出绕过图表丢页
+    （lossy 分支仅 format==xlsx）；(b) 管线式 claim 的嵌入参数（*_dpi: 200）；
+    (c) 真错（xlsx 直出）仍拒。红线口径=审计，审计须与工具真实因果一致。"""
+    from examples.docworkbench.audit import statement_matches_truth
+
+    # (a) format=json 绕过 xlsx 图表丢页——真策略
+    alt_format = {
+        "claim": {"dimension": "export", "action": "export_document",
+                  "params": {"format": "json"}},
+        "statement": "export with explicit non-xlsx format keeps all pages",
+    }
+    assert statement_matches_truth(alt_format) is True
+    # (b) 管线式：参数名嵌入 dpi，值满足 >=200
+    pipeline = {
+        "claim": {"dimension": "export", "action": "export_document",
+                  "params": {"format": "pdf", "preceded_by_convert_dpi": 200}},
+        "statement": "管线：convert(dpi=200) 后导出",
+    }
+    assert statement_matches_truth(pipeline) is True
+    # (c) xlsx 直出（真错）仍拒
+    wrong = {
+        "claim": {"dimension": "export", "action": "export_document",
+                  "params": {"format": "xlsx"}},
+        "statement": "xlsx direct export keeps all pages",
+    }
+    assert statement_matches_truth(wrong) is False

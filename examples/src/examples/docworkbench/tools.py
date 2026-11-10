@@ -38,6 +38,13 @@ HIDDEN_CONSTRAINTS: list[dict] = [
         "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
     },
     {
+        "id": "export_non_xlsx_bypass",
+        "dimension": "export",
+        "rule": "图表丢页分支仅作用于 format==xlsx；显式非 xlsx 格式导出保留全部页",
+        "naive_fails": False,
+        "claim": {"action": "export_document", "param": "format", "op": "!=", "value": "xlsx"},
+    },
+    {
         "id": "perception_low_contrast",
         "dimension": "extract",
         "rule": "低对比度页(contrast<0.5)读图前须 convert_format(dpi>=150) 提升对比度，"

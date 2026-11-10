@@ -359,7 +359,7 @@ class DocumentAgentApp:
                 report = await evolution.evaluate(
                     cid, mini_batch, runner, regression_scenarios=regression
                 )
-                audit_ok = statement_matches_truth(str(r.content.get("statement", "")))
+                audit_ok = statement_matches_truth(r.content)  # 与 audit_promoted 同口径
                 try:
                     manifest = await evolution.publish(cid, report)
                 except PublishDenied:
