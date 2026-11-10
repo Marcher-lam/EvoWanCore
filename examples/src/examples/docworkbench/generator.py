@@ -145,17 +145,20 @@ def _task_for(dim: str, doc: dict, rng: random.Random, seq: int) -> tuple[dict, 
         return task, truth, check_export
 
     if dim == "extract":
-        def check_extract(result: dict) -> dict:
+        def check_extract_submit(result: dict) -> dict:
+            """T18 image-based：判 submit 交付的 fields 对照渲染真值（程序化，不信自述）。"""
             expected = {f["name"]: f["value"] for f in doc["fields"]}
+            got = result.get("fields") or {}
             return {
-                "passed": result.get("fields") == expected and not result.get("contaminated"),
-                "checks": [{"check": "fields_match", "expect_n": len(expected),
-                            "detail": "字段值须与真值一致且未被串栏污染"}],
+                "passed": got == expected,
+                "checks": [{"check": "fields_match_truth", "expect_n": len(expected),
+                            "detail": "提交字段须与渲染真值一致（读图判分）"}],
             }
-        task = {"id": tid, "dimension": dim, "doc_id": doc["id"], "goal": "抽取全部字段"}
-        truth = {"expected_result": {"fields": {f["name"]: f["value"] for f in doc["fields"]},
-                                     "contaminated": False}}
-        return task, truth, check_extract
+        task = {"id": tid, "dimension": dim, "doc_id": doc["id"],
+                "goal": "读图抽取全部字段并提交"}
+        truth = {"expected_result": {
+            "fields": {f["name"]: f["value"] for f in doc["fields"]}, "source": "image"}}
+        return task, truth, check_extract_submit
 
     if dim == "convert":
         def check_convert(result: dict) -> dict:

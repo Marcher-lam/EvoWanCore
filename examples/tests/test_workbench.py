@@ -141,3 +141,47 @@ def test_render_enhanced_deterministic() -> None:
         }
     )
     assert lifted != a.assets[doc["id"]], "对比度必须影响渲染输出"
+
+
+# ---------- T18：image-based extract ----------
+
+
+def test_image_extract_tool_returns_no_values() -> None:
+    """感知化抽取工具只回图片引用与页对比度——字段值不得进入工具通道。"""
+    import json as _json
+
+    from examples.docworkbench.tools import extract_fields_from_image
+
+    corpus = generate_corpus(seed=5, size=8, difficulty=0.8)
+    doc = next(d for d in corpus.documents if d["kind"] == "scan")
+    out = extract_fields_from_image(doc)
+    assert out["image_ref"] == doc["id"]
+    assert out["pages"] and all(
+        set(p) == {"page", "contrast"} for p in out["pages"]
+    ), "页清单只含 page/contrast"
+    blob = _json.dumps(out)
+    for f in doc["fields"]:
+        assert str(f["value"]) not in blob, "字段值不得泄漏进工具输出"
+
+
+def test_acceptance_judges_submitted_fields() -> None:
+    """extract 判分改对提交交付：真值 pass、错值 fail；convert(dpi>=150) 提升页对比度。"""
+    from examples.docworkbench.tools import convert_format
+
+    corpus = generate_corpus(seed=5, size=8, difficulty=0.8)
+    task = next(t for t in corpus.tasks if t["dimension"] == "extract")
+    doc = next(d for d in corpus.documents if d["id"] == task["doc_id"])
+    truth = {f["name"]: f["value"] for f in doc["fields"]}
+
+    right = run_acceptance(task["id"], {"doc_id": doc["id"], "fields": truth}, corpus)
+    assert right.passed, "提交真值应通过"
+    poisoned = {**truth, next(iter(truth)): "__WRONG__"}
+    wrong = run_acceptance(task["id"], {"doc_id": doc["id"], "fields": poisoned}, corpus)
+    assert not wrong.passed, "提交错值应失败"
+
+    conv = convert_format(doc, dpi=200)
+    assert all(p["contrast"] == 1.0 for p in conv["pages"]), "convert(dpi>=150) 应提升页对比度"
+    low = convert_format(doc, dpi=100)
+    assert any(p.get("contrast", 1.0) < 1.0 for p in low["pages"]) or low["lossy"], (
+        "低 dpi 不提升对比度（且扫描件丢字段）"
+    )

@@ -64,12 +64,36 @@ def extract_fields(doc: dict, region: str | None = None) -> dict:
     return {"fields": {f["name"]: f["value"] for f in doc["fields"]}, "contaminated": False}
 
 
+def extract_fields_from_image(doc: dict) -> dict:
+    """感知化抽取（T18）：只给图片引用与页对比度——字段值只在渲染 PNG 与真值表。"""
+    return {
+        "image_ref": doc["id"],
+        "pages": [
+            {"page": i, "contrast": float(p.get("contrast", 1.0))}
+            for i, p in enumerate(doc["pages"])
+        ],
+    }
+
+
+def submit_extracted_fields(doc_id: str, fields: dict) -> dict:
+    """交付抽取结果（T18）：模型读图后提交；交付载荷进证据链，由验收对照真值判分。"""
+    return {"doc_id": doc_id, "fields": dict(fields), "source": "image_read"}
+
+
 def convert_format(doc: dict, dpi: int = 200) -> dict:
-    """格式转换。隐藏约束：扫描件低 dpi 丢字段；高 dpi 为安全导出做准备。"""
+    """格式转换。隐藏约束：扫描件低 dpi 丢字段；高 dpi 为安全导出做准备。
+
+    T18：dpi>=150 时页对比度提升到 1.0（感知约束的可解除载体——convert 后读图全对）。
+    """
     if doc.get("kind") == "scan" and dpi < _REQUIRED_DPI:
         kept = [f for f in doc["fields"] if f.get("contrast", 1.0) >= 0.8]
         return {**doc, "fields": kept, "lossy": True, "dpi": dpi}
-    return {**doc, "lossy": False, "dpi": dpi, "export_ready": dpi >= _SAFE_EXPORT_DPI}
+    if dpi >= _REQUIRED_DPI:
+        pages = [{**p, "contrast": 1.0} for p in doc["pages"]]
+    else:
+        pages = doc["pages"]
+    return {**doc, "pages": pages, "lossy": False, "dpi": dpi,
+            "export_ready": dpi >= _SAFE_EXPORT_DPI}
 
 
 def export_document(doc: dict, format: str = "xlsx") -> dict:

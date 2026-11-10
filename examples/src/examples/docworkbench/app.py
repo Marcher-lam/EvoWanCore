@@ -32,7 +32,7 @@ from examples.docworkbench.corpus import Corpus, CorpusPart
 
 DIM_TOOL = {
     "export": "export_document",
-    "extract": "extract_fields",
+    "extract": "submit_extracted_fields",  # T18：extract 判分看提交交付（读图后 submit）
     "convert": "convert_format",
     "validate": "validate_form",
 }
@@ -357,9 +357,30 @@ def _bind_tools(
 
     tool("parse_document", wb.parse_document)
     tool("extract_fields", wb.extract_fields)
+    tool("extract_fields_from_image", wb.extract_fields_from_image)
     tool("convert_format", wb.convert_format, side_effect="write")
     tool("export_document", wb.export_document, side_effect="write")
     tool("validate_form", wb.validate_form)
+
+    # T18：submit 交付区写入（handler 需要原始 args 的 fields，不走 doc 包装）
+    async def submit_handler(args):
+        payload = wb.submit_extracted_fields(args["doc_id"], args.get("fields", {}))
+        derived[f"extract_submission:{args['doc_id']}"] = payload
+        return payload
+
+    registry.bind(
+        CapabilityDescriptor(
+            id="submit_extracted_fields",
+            type=CapabilityType.TOOL,
+            name="submit_extracted_fields",
+            input_schema={"doc_id": "str", "fields": "dict"},
+            output_schema={},
+            side_effect_level="write",
+            auth_scope=[],
+            tags=["workbench"],
+        ),
+        submit_handler,
+    )
 
     # convert 产生派生文档，供 export/extract 消费——M8：公有 rebind 覆盖绑定
     original_convert = wb.convert_format
