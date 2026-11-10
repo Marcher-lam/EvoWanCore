@@ -218,3 +218,17 @@ def test_image_extract_in_heldout() -> None:
     practice, heldout = split_corpus(corpus, 0.5)
     assert any(t["dimension"] == "extract" for t in practice.tasks), "练习池含 image extract"
     assert any(t["dimension"] == "extract" for t in heldout.tasks), "保留集含 image extract"
+
+
+def test_perceptual_extract_docs_carry_trap() -> None:
+    """T23 迭代 4：感知语料中 extract 维度文档结构性带陷阱（扫描件+低对比度页）——
+    门的验证场与保留集评分不再依赖扫描概率彩票。"""
+    corpus = generate_corpus(seed=41, size=8, difficulty=0.8, perceptual=True)
+    # 维度按文档索引轮转（generator 不变量），extract 文档 = i%4==1
+    extract_docs = [corpus.documents[i] for i in range(len(corpus.documents)) if i % 4 == 1]
+    assert extract_docs
+    for doc in extract_docs:
+        assert doc["kind"] == "scan", "感知语料 extract 文档必须是扫描件"
+        assert any(p.get("contrast", 1.0) < 0.5 for p in doc["pages"]), (
+            "extract 扫描文档必须含低对比度页（陷阱载体）"
+        )

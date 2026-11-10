@@ -16,13 +16,19 @@ from examples.docworkbench.tools import validate_form
 DIMS = ["export", "extract", "convert", "validate"]
 
 
-def _make_doc(rng: random.Random, i: int, difficulty: float) -> dict:
+def _make_doc(
+    rng: random.Random, i: int, difficulty: float, *, force_scan: bool = False
+) -> dict:
     # 高难度：双栏版式加权（region 陷阱更多）、扫描件更多（低对比度字段）
     hard = difficulty >= 0.7
     layouts = ["two_column", "two_column"] if hard else ["two_column"]
     layouts += ["form", "report"]
     layout = rng.choice(layouts)
-    kind = "scan" if rng.random() < (0.5 if hard else 0.3) else "native"
+    kind = (
+        "scan"
+        if force_scan or rng.random() < (0.5 if hard else 0.3)
+        else "native"
+    )
     n_fields = 3 + int(difficulty * 6)
     fields = []
     for fi in range(n_fields):
@@ -192,7 +198,12 @@ def generate_corpus(
     seed: int, size: int, difficulty: float, *, perceptual: bool = False
 ) -> Corpus:
     rng = random.Random(seed)
-    documents = [_make_doc(rng, i, difficulty) for i in range(size)]
+    # 感知语料：extract 维度文档结构性为扫描件（i%4==1 → DIMS[1]=extract），
+    # 低对比度读图陷阱不再依赖扫描概率彩票（门的验证场与保留集评分稳定性）
+    documents = [
+        _make_doc(rng, i, difficulty, force_scan=perceptual and i % len(DIMS) == 1)
+        for i in range(size)
+    ]
 
     tasks: list[dict] = []
     ground_truth: dict = {}
