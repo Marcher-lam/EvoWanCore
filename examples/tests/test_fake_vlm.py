@@ -95,3 +95,31 @@ async def test_after_convert_reads_correctly() -> None:
     _doc_id, fields = _submitted_fields(await vlm.infer(_request_for(doc["id"])))
     assert fields == truth, "convert 后应读出真值（读图前须提升对比度）"
 
+
+
+async def test_fake_vlm_with_rule_converts_first() -> None:
+    """T23：低对比度 + 上下文已发布规则 → FakeVLM 先 convert（真 VLM 的理性行为）；
+    规则缺位则保持读错。这是探索闭环因果生效的机制载体。"""
+    from agent_core.models import InferRequest
+
+    corpus = _corpus()
+    doc = next(
+        d
+        for d in corpus.documents
+        if any(p.get("contrast", 1.0) < 0.5 for p in d["pages"])
+    )
+    vlm = WorkbenchFakeVLM(corpus, derived={})
+    rule_msg = InferRequest(
+        model_id="fake-vlm",
+        messages=[
+            {"role": "system", "content": (
+                "Relevant memory:\n- [rule|verified] 低对比度页(contrast<0.5)读图前须 "
+                "convert_format(dpi>=150) 提升对比度，否则读图必错")},
+            {"role": "user", "content": f"image_ref={doc['id']} 读图抽取"},
+        ],
+    )
+    resp = await vlm.infer(rule_msg)
+    assert resp.tool_calls and resp.tool_calls[0]["name"] == "convert_format", (
+        "有规则时低对比度文档应先转换（而非直接提交错值）"
+    )
+    assert resp.tool_calls[0]["arguments"]["dpi"] >= 150

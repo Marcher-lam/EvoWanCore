@@ -16,6 +16,14 @@ from agent_core.models import InferRequest, InferResponse, Modality, ModelCapabi
 
 _DOC_ID = re.compile(r"doc_\d+")
 
+_RULE_MARKERS = ("convert_format", "对比度", "contrast")
+
+
+def _rule_seen(blob: str) -> bool:
+    """上下文是否携带"convert 提升对比度"类已发布规则。"""
+    low = blob.lower()
+    return any(m in low for m in _RULE_MARKERS)
+
 
 def _perturb(doc_id: str, name: str, value: object) -> object:
     """确定性错值（同输入同输出，且保证 ≠ 真值）。"""
@@ -62,6 +70,19 @@ class WorkbenchFakeVLM:
         )
         if doc is None:
             return InferResponse(text=f"unknown document {doc_id}")
+        low_contrast = any(float(p.get("contrast", 1.0)) < 0.5 for p in doc["pages"])
+        # T23：模拟理性读图代理——上下文有已发布的感知规则（convert 提升对比度）时，
+        # 低对比度文档先转换再读；无规则则按对比度直读（会读错）。规则因果生效的载体。
+        if low_contrast and _rule_seen(blob):
+            return InferResponse(
+                tool_calls=[
+                    {
+                        "id": "vlm_convert_1",
+                        "name": "convert_format",
+                        "arguments": {"doc_id": doc_id, "dpi": 200},
+                    }
+                ]
+            )
         return InferResponse(
             tool_calls=[
                 {

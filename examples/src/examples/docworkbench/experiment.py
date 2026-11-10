@@ -29,6 +29,7 @@ class ExperimentConfig:
     workdir: Path | None = None
     max_waves: int = 4
     use_llm_reflector: bool = False  # V2 B 检查点：真 LLM 反思（T10）
+    use_fake_vlm: bool = False  # v3 感知实验：WorkbenchFakeVLM 读图（T23）
 
 
 class ArmReport(BaseModel):
@@ -157,6 +158,14 @@ def _arm_stats(
     )
 
 
+def _vlm_factory(config: ExperimentConfig):
+    if not config.use_fake_vlm:
+        return None
+    from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
+
+    return lambda corpus, derived: WorkbenchFakeVLM(corpus, derived)
+
+
 async def _explore_arm(
     config: ExperimentConfig, seed: int, corpus, practice, heldout
 ) -> tuple[ArmReport, list[tuple[dict, float]]]:
@@ -172,6 +181,7 @@ async def _explore_arm(
         blob_dir=workdir / "blobs",
         corpus=corpus,
         practice_part=practice,
+        vlm_factory=_vlm_factory(config),
     )
     if config.use_llm_reflector:
         from agent_explore.reflector import LLMReflector
@@ -203,6 +213,7 @@ async def _retry_arm(
         blob_dir=workdir / "blobs",
         corpus=corpus,
         practice_part=practice,
+        vlm_factory=_vlm_factory(config),
     )
     meter = BudgetMeter(config.budget_w)
     counter = app.model_counter  # §6.2：重试臂计真实 solve 调用

@@ -34,6 +34,7 @@ def run_experiment(config: str, out: str) -> None:
         ),
         workdir=Path(out).parent / "workdirs",
         use_llm_reflector=raw.get("llm_reflector", False),
+        use_fake_vlm=raw.get("fake_vlm", False),
     )
     report = asyncio.run(run_experiment(cfg))
     path = Path(out)

@@ -426,6 +426,7 @@ def build_app(
     verifier=None,
     reflector=None,
     vlm_adapter=None,
+    vlm_factory=None,
 ) -> DocumentAgentApp:
     from agent_core.models import CountingAdapter, ModelGateway
 
@@ -433,11 +434,12 @@ def build_app(
     model_counter = CountingAdapter(model_adapter)
     gateway = ModelGateway()
     gateway.register(model_counter)
-    if vlm_adapter is not None:
-        gateway.register(vlm_adapter)  # T21：视觉任务按能力路由命中（inputs 含 IMAGE）
+    derived: dict[str, dict] = {}
+    vlm = vlm_adapter or (vlm_factory(corpus, derived) if vlm_factory else None)
+    if vlm is not None:
+        gateway.register(vlm)  # T21：视觉任务按能力路由命中（inputs 含 IMAGE）
 
     registry = InMemoryCapabilityRegistry()
-    derived: dict[str, dict] = {}
     _bind_tools(registry, corpus, derived)
 
     event_log = SqliteEventLog(Path(db_path).with_suffix(".log.db"))
