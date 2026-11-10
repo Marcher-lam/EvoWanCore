@@ -24,14 +24,20 @@ def run_experiment(config: str, out: str) -> None:
     from examples.docworkbench.generator import generate_corpus
 
     raw = json.loads(Path(config).read_text())
+    max_calls = raw.get("max_tokens")  # C1：真实调用计数预算（W 口径，可选）
     cfg = ExperimentConfig(
         seeds=raw.get("seeds", [1]),
-        budget_w=ExplorationBudget(max_actions=raw.get("max_actions", 4)),
+        budget_w=ExplorationBudget(
+            max_actions=raw.get("max_actions", 4), max_tokens=max_calls
+        ),
         practice_ratio=raw.get("practice_ratio", 0.5),
         corpus_factory=lambda seed: generate_corpus(
-            seed, raw.get("size", 8), raw.get("difficulty", 0.4)
+            seed, raw.get("size", 8), raw.get("difficulty", 0.4),
+            perceptual=raw.get("perceptual", False),
         ),
         workdir=Path(out).parent / "workdirs",
+        use_llm_reflector=raw.get("llm_reflector", False),
+        use_fake_vlm=raw.get("fake_vlm", False),
     )
     report = asyncio.run(run_experiment(cfg))
     path = Path(out)

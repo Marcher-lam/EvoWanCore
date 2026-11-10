@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from agent_core.capability import CapabilityDescriptor, CapabilityType, InMemoryCapabilityRegistry
@@ -32,7 +33,7 @@ from examples.docworkbench.corpus import Corpus, CorpusPart
 
 DIM_TOOL = {
     "export": "export_document",
-    "extract": "extract_fields",
+    "extract": "submit_extracted_fields",  # T18：extract 判分看提交交付（读图后 submit）
     "convert": "convert_format",
     "validate": "validate_form",
 }
@@ -95,6 +96,11 @@ class DocumentAgentApp:
         evidence: SqliteEvidenceStore,
         practice_part: CorpusPart | None,
         derived: dict[str, dict],
+        model_counter=None,
+        event_log=None,
+        memory_retriever=None,
+        evo_db_path: Path | None = None,
+        reflector=None,
     ) -> None:
         self._gateway = gateway
         self._runtime = runtime
@@ -106,7 +112,38 @@ class DocumentAgentApp:
         self._evidence = evidence
         self._derived = derived
         self._practice_part = practice_part
+        self._model_counter = model_counter
+        self._event_log = event_log
+        self._memory_retriever = memory_retriever
+        self._evo_db_path = evo_db_path
+        self._reflector_impl = reflector  # 注入式 reflector（V2 T10 LLMReflector）
         self._agent = AgentSpec(id="doc_agent", role="document worker", model_id="m-app")
+
+    @property
+    def model_counter(self):
+        """真实调用计数器（CountingAdapter）——实验两臂的统一预算口径（§6.2）。"""
+        return self._model_counter
+
+    @property
+    def gateway(self):
+        """app 网关（物理适配器外已包 CountingAdapter——注入组件共享计量）。"""
+        return self._gateway
+
+    def use_reflector(self, reflector) -> None:
+        """注入式 reflector（V2 T10）：LLMReflector 须共享 app gateway 以计入真实调用。"""
+        self._reflector_impl = reflector
+
+    def set_memory_visibility(
+        self, include_candidates: bool, only: set[str] | None = None
+    ) -> None:
+        """V2 §6.4：切换候选记忆可见性（评测门 with/without 双臂 + 审计）。
+
+        only：with 臂单候选隔离——被评候选之外的其他 pending 候选不得进入上下文
+        （跨候选污染曾让错误规则借他人之力的对照差过门，T31-C）。
+        """
+        if self._memory_retriever is not None:
+            self._memory_retriever.include_candidates = include_candidates
+            self._memory_retriever.candidate_allowlist = only
 
     @property
     def practice_task_ids(self) -> set[str]:
@@ -115,12 +152,23 @@ class DocumentAgentApp:
         return {t["id"] for t in self._practice_part.tasks}
 
     async def solve(self, corpus_task: dict) -> RunHandle:
+        # T23：每次 solve 从原始文档开始——评测门父子臂/重试臂不得共享上一轮 convert
+        # 的派生产物（否则 parent 臂经 with 臂的 derived 白读真值，对照失效）
+        self._derived.pop(corpus_task["doc_id"], None)
+        # T21：感知任务（image_required）→ vision 约束 + 渲染 PNG 作 data URL
+        constraints: dict = {}
+        if corpus_task.get("image_required"):
+            png = self._corpus.assets.get(corpus_task["doc_id"], b"")
+            constraints = {
+                "vision": True,
+                "image_url": f"data:image/png;base64,{base64.b64encode(png).decode()}",
+            }
         spec = TaskSpec(
             id=corpus_task["id"],
             kind=f"wb:{corpus_task['dimension']}",
             goal={"what": corpus_task["goal"], "doc_id": corpus_task["doc_id"]},
             input_schema={},
-            constraints={},
+            constraints=constraints,
             acceptance_criteria=[{"check": "workbench_programmatic"}],
         )
         return await self._runtime.submit(spec, self._agent)
@@ -143,9 +191,10 @@ class DocumentAgentApp:
             app_context={
                 "runtime": self._runtime,
                 "agent": self._agent,
-                "reflector": self._reflector,
+                "reflector": self._reflector_impl or self._reflector,
                 "environment_version": ENV_VERSION,
                 "practice_pool": self._practice_pool(),
+                "model_counter": self._model_counter,
             },
         )
         # 探索产出的候选经验：验证通过后发布（对 solve 生效）
@@ -180,31 +229,174 @@ class DocumentAgentApp:
                 },
                 "applicability": {"app": "workbench", "env_version": ENV_VERSION},
                 "evidence_refs": outcome.evidence_refs,
+                "environment_version": ENV_VERSION,
             }
         ]
 
+    def _claim_target_dims(self, claim: dict) -> list[str]:
+        """T23：门验证场按 claim.action 定向——动作在哪些维度上是有区分度的陷阱。
+
+        convert_format 的规则在 convert 任务上无区分度（默认 dpi 已过），其效果
+        场在 export（图表丢页）/extract（低对比度读图）陷阱任务。
+        """
+        action = (claim or {}).get("action")
+        targeted = {
+            "convert_format": ["export", "extract"],
+            "extract_fields": ["extract"],
+            "export_document": ["export"],
+            "validate_form": ["validate"],
+        }
+        if action in targeted:
+            return targeted[action]
+        return []  # 由调用方退回来源维度
+
+    def _trap_depth(self, task: dict) -> int:
+        """T23：任务文档的陷阱深度——extract=低对比度页数；export=图表扫描页；
+        convert=扫描件。门任务优先带陷阱的文档，规则才可被行为验证。"""
+        doc = next(
+            (d for d in self._corpus.documents if d["id"] == task["doc_id"]), None
+        )
+        if doc is None:
+            return 0
+        dim = task["dimension"]
+        if dim == "extract":
+            return sum(1 for p in doc["pages"] if p.get("contrast", 1.0) < 0.5)
+        if dim == "export":
+            return 1 if doc.get("has_chart_page") else 0
+        if dim == "convert":
+            return 1 if doc.get("kind") == "scan" else 0
+        return 0
+
+    def _gate_tasks(
+        self,
+        practice_ids: set[str],
+        heldout_ids: set[str],
+        *,
+        dimension: str = "",
+        dimensions: list[str] | None = None,
+        exclude: bool = False,
+        limit: int = 3,
+    ) -> list[TaskSpec]:
+        """门评测任务选择 + 来源守卫（T12）：只出练习池；保留集 id 混入 → ValueError 红线。
+
+        exclude=False 选该维度任务（mini-batch，父子对比）；exclude=True 选其他维度
+        （回归场景，护旧能力）。
+        """
+        pool = [t for t in self._corpus.tasks if t["id"] in practice_ids]
+        want = set(dimensions) if dimensions else ({dimension} if dimension else set())
+        if exclude:
+            selected = [t for t in pool if t["dimension"] not in want][:limit]
+        else:
+            same_dim = [t for t in pool if t["dimension"] in want]
+            # T23：优先陷阱文档（规则只有在能区分对错的题上才可被验证）
+            selected = sorted(same_dim, key=lambda t: -self._trap_depth(t))[:limit]
+        leaked = {t["id"] for t in selected} & set(heldout_ids)
+        if leaked:
+            raise ValueError(f"评测门吃到保留集任务（红线）: {sorted(leaked)}")
+        return [
+            TaskSpec(
+                id=t["id"],
+                kind=f"wb:{t['dimension']}",
+                goal={"what": t["goal"], "doc_id": t["doc_id"]},
+                input_schema={},
+                constraints={},
+                acceptance_criteria=[{"check": "workbench_programmatic"}],
+            )
+            for t in selected
+        ]
+
     async def _publish_candidates(self) -> None:
-        """发布门：陈述须与工作台真值一致（环境级验收），否则保持 CANDIDATE。"""
+        """V2 T12 通用评测门：EvolutionController 父子对比 + 回归通过才发布。
+
+        真值表（statement_matches_truth）退为审计标记，不再 gate（I1 教训泛化）。
+        DualRunner = 同 app solve：with_candidate ↔ 候选可见性切换（T11 默认排除）。
+        """
+        from agent_evolve.controller import (
+            EvolutionController,
+            ExperienceCandidate,
+            PublishDenied,
+        )
+
         from examples.docworkbench.audit import statement_matches_truth
 
         rules = await self._memory_store.query("rules", {})
-        for r in rules:
-            if r.verification.value != "candidate" or not r.evidence_refs:
-                continue
-            statement = str(r.content.get("statement", ""))
-            gate_ok = statement_matches_truth(statement)
-            try:
+        pending = [r for r in rules if r.verification.value == "candidate" and r.evidence_refs]
+        if not pending:
+            return
+
+        practice_ids = self.practice_task_ids
+        heldout_ids = {t["id"] for t in self._corpus.tasks} - practice_ids
+        evolution = EvolutionController(
+            memory_store=self._memory_store,
+            memory_publisher=self._publisher,
+            db_path=self._evo_db_path,
+            event_log=self._event_log,
+        )
+        try:
+            for r in pending:
+                dimension = r.source_refs[0].split("_", 1)[0] if r.source_refs else ""
+                # T23：优先按 claim.action 定向验证场（convert 规则在 export/extract 陷阱上
+                # 才有区分度；LLM 自报 dimension 常错标为 convert）
+                target_dims = self._claim_target_dims(r.content.get("claim")) or [dimension]
+                mini_batch = self._gate_tasks(
+                    practice_ids, heldout_ids, dimensions=target_dims
+                )
+                regression = self._gate_tasks(
+                    practice_ids, heldout_ids, dimensions=target_dims, exclude=True, limit=2
+                )
+
+                async def runner(
+                    task: TaskSpec,
+                    *,
+                    with_candidate: bool,
+                    _only: frozenset[str] = frozenset({r.id}),  # B023：默认参绑定本轮候选
+                ) -> float:
+                    self.set_memory_visibility(with_candidate, only=set(_only))
+                    corpus_task = next(
+                        t for t in self._corpus.tasks if t["id"] == task.id
+                    )
+                    run = await self.solve(corpus_task)
+                    return 1.0 if run.state.value == "succeeded" else 0.0
+
+                cid = evolution.submit(
+                    ExperienceCandidate(
+                        candidate_type="memory",
+                        payload={
+                            "memory_id": r.id,
+                            "statement": str(r.content.get("statement", "")),
+                        },
+                        source_practice_ids=list(r.source_refs),
+                    )
+                )
+                report = await evolution.evaluate(
+                    cid, mini_batch, runner, regression_scenarios=regression
+                )
+                audit_ok = statement_matches_truth(r.content)  # 与 audit_promoted 同口径
+                try:
+                    manifest = await evolution.publish(cid, report)
+                except PublishDenied:
+                    continue  # 未过门：保持 CANDIDATE，等待反例/复审
+                # T31-C 红线否决：claim 机器审计不过（反真值/不可判）不发布——
+                # 错误晋级率=0 优先于泛化发布路径（eval 门仍是主门，此处仅拦
+                # 审计必错的 claim；见台账 Ruling）
+                if not audit_ok:
+                    continue
                 await self._publisher.publish(
                     r.id,
                     verifier_report={
-                        "source": "exploration",
-                        "app": "workbench",
-                        "passed": gate_ok,
-                        "checks": [{"check": "statement_matches_truth", "ok": gate_ok}],
+                        "source": "evolution_gate",
+                        "passed": True,
+                        "manifest": manifest.release_id,
+                        "audit_truth_match": audit_ok,  # 真值表退为审计标记
+                        "eval": {
+                            "mini": report.mini_batch_scores,
+                            "parent": report.parent_scores,
+                            "regression": report.regression_violations,
+                        },
                     },
                 )
-            except Exception:
-                pass  # 发布被拒：保持 CANDIDATE，等待反例/复审
+        finally:
+            self.set_memory_visibility(False)
 
 
 def _bind_tools(
@@ -237,11 +429,32 @@ def _bind_tools(
 
     tool("parse_document", wb.parse_document)
     tool("extract_fields", wb.extract_fields)
+    tool("extract_fields_from_image", wb.extract_fields_from_image)
     tool("convert_format", wb.convert_format, side_effect="write")
     tool("export_document", wb.export_document, side_effect="write")
     tool("validate_form", wb.validate_form)
 
-    # convert 产生派生文档，供 export/extract 消费
+    # T18：submit 交付区写入（handler 需要原始 args 的 fields，不走 doc 包装）
+    async def submit_handler(args):
+        payload = wb.submit_extracted_fields(args["doc_id"], args.get("fields", {}))
+        derived[f"extract_submission:{args['doc_id']}"] = payload
+        return payload
+
+    registry.bind(
+        CapabilityDescriptor(
+            id="submit_extracted_fields",
+            type=CapabilityType.TOOL,
+            name="submit_extracted_fields",
+            input_schema={"doc_id": "str", "fields": "dict"},
+            output_schema={},
+            side_effect_level="write",
+            auth_scope=[],
+            tags=["workbench"],
+        ),
+        submit_handler,
+    )
+
+    # convert 产生派生文档，供 export/extract 消费——M8：公有 rebind 覆盖绑定
     original_convert = wb.convert_format
 
     async def convert_handler(args):
@@ -251,7 +464,19 @@ def _bind_tools(
         return {"lossy": converted.get("lossy", False), "dpi": converted.get("dpi"),
                 "export_ready": converted.get("export_ready", False), "doc_id": args["doc_id"]}
 
-    registry._bindings["convert_format"] = convert_handler  # noqa: SLF001
+    registry.rebind(
+        CapabilityDescriptor(
+            id="convert_format",
+            type=CapabilityType.TOOL,
+            name="convert_format",
+            input_schema={"doc_id": "str"},
+            output_schema={},
+            side_effect_level="write",
+            auth_scope=[],
+            tags=["workbench"],
+        ),
+        convert_handler,
+    )
 
 
 def build_app(
@@ -261,14 +486,32 @@ def build_app(
     blob_dir: Path | str,
     corpus: Corpus,
     practice_part: CorpusPart | None = None,
+    heldout_part: CorpusPart | None = None,
+    verifier=None,
+    reflector=None,
+    vlm_adapter=None,
+    vlm_factory=None,
 ) -> DocumentAgentApp:
-    from agent_core.models import ModelGateway
+    from agent_core.models import CountingAdapter, ModelGateway
 
+    # V2 §6.2：物理适配器包计数层——gateway 上的一切调用（solve/课程/reflector）都被计量
+    model_counter = CountingAdapter(model_adapter)
     gateway = ModelGateway()
-    gateway.register(model_adapter)
+    gateway.register(model_counter)
+    derived: dict[str, dict] = {}
+    vlm = vlm_adapter or (vlm_factory(corpus, derived) if vlm_factory else None)
+    if vlm is not None:
+        gateway.register(vlm)  # T21：视觉任务按能力路由命中（inputs 含 IMAGE）
+
+    # I3：切分缺陷绊线——练习池混入保留集任务在组装期即炸（红线独立断言）
+    if practice_part is not None and heldout_part is not None:
+        overlap = {t["id"] for t in practice_part.tasks} & {
+            t["id"] for t in heldout_part.tasks
+        }
+        if overlap:
+            raise ValueError(f"保留集任务混入练习池（红线）: {sorted(overlap)}")
 
     registry = InMemoryCapabilityRegistry()
-    derived: dict[str, dict] = {}
     _bind_tools(registry, corpus, derived)
 
     event_log = SqliteEventLog(Path(db_path).with_suffix(".log.db"))
@@ -277,7 +520,7 @@ def build_app(
     memory_store = SqliteMemoryStore(Path(db_path).with_suffix(".mem.db"))
     gap_ledger = SqliteGapLedger(Path(db_path).with_suffix(".gaps.db"))
 
-    verifier = WorkbenchVerifier(corpus, evidence)
+    runtime_verifier = verifier if verifier is not None else WorkbenchVerifier(corpus, evidence)
     retriever = SimpleRetriever(memory_store)
     assembler = TokenBudgetAssembler()
 
@@ -288,9 +531,10 @@ def build_app(
         event_log=event_log,
         state_store=state_store,
         evidence_store=evidence,
-        verifier=verifier,
+        verifier=runtime_verifier,
         memory_retriever=retriever,
         context_assembler=assembler,
+        environment_version=ENV_VERSION,
     )
 
     controller = ExplorationController(
@@ -314,4 +558,9 @@ def build_app(
         evidence=evidence,
         practice_part=practice_part,
         derived=derived,
+        model_counter=model_counter,
+        event_log=event_log,
+        memory_retriever=retriever,
+        evo_db_path=Path(db_path).with_suffix(".evo.db"),
+        reflector=reflector,
     )

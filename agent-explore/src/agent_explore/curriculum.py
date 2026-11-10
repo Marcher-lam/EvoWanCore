@@ -112,6 +112,11 @@ class BudgetMeter:
     def status(self) -> BudgetStatus:
         return self.consume()
 
+    @property
+    def exhausted(self) -> bool:
+        """与 AgentRuntime budget_gate 鸭型兼容（真实调用计数口径同样适用）。"""
+        return self.status.exhausted
+
 
 class CurriculumGenerator(Protocol):
     async def plan_wave(
@@ -143,9 +148,13 @@ class LLMCurriculumGenerator:
         self._model_id = model_id
 
     async def _infer_validated(
-        self, messages: list[dict], schema_hint: dict, result_cls
+        self, messages: list[dict], schema_hint: dict, result_cls, post_check=None
     ):
-        """带校验-重试的 infer：畸形输出重试一次（附错误），再失败抛错。"""
+        """带校验-重试的 infer：畸形输出重试一次（附错误），再失败抛错。
+
+        post_check: 结构合法后的语义校验（如 T13 gap 覆盖）；返回错误串或 None，
+        非 None 同样走重试-失败路径。
+        """
         request_msgs = list(messages)
         last_error = ""
         for _attempt in range(2):
@@ -158,8 +167,13 @@ class LLMCurriculumGenerator:
                 )
             )
             try:
-                return result_cls.model_validate_json(resp.text)
-            except (json.JSONDecodeError, ValidationError) as e:
+                parsed = result_cls.model_validate_json(resp.text)
+                if post_check is not None:
+                    semantic_error = post_check(parsed)
+                    if semantic_error:
+                        raise ValueError(semantic_error)  # noqa: TRY301 — 语义校验走同款重试
+                return parsed
+            except (json.JSONDecodeError, ValidationError, ValueError) as e:
                 last_error = f"{type(e).__name__}: {e}"
                 request_msgs = list(messages) + [
                     {
@@ -186,6 +200,15 @@ class LLMCurriculumGenerator:
                 f" Practiceable tasks (task ids MUST come from this pool; unknown ids "
                 f"cannot be verified and will fail): {ids}."
             )
+        gaps_hint = ""
+        if view.gaps:
+            affected = sorted(
+                {c.split("_", 1)[0] for g in view.gaps for c in g.affected_capabilities}
+            )
+            gaps_hint = (
+                f" OPEN GAPS (unpassed practice dimensions): {affected} — at least ONE "
+                "task in this wave MUST target one of these gap dimensions."
+            )
         messages = [
             {
                 "role": "system",
@@ -193,9 +216,9 @@ class LLMCurriculumGenerator:
                     f"You are the curriculum planner for a document-workbench agent "
                     f"(mode={mode}). Design a practice wave. Signals: "
                     f"{json.dumps(view.signals)}. Frontier: "
-                    f"{view.frontier.model_dump()}.{pool_hint} Produce ONE PracticeWavePlan"
-                    " JSON: a wave (use the given snapshot id) plus 1-4 tasks; every task "
-                    "MUST carry an acceptance spec."
+                    f"{view.frontier.model_dump()}.{gaps_hint}{pool_hint} Produce ONE "
+                    "PracticeWavePlan JSON: a wave (use the given snapshot id) plus 1-4 "
+                    "tasks; every task MUST carry an acceptance spec."
                 ),
             },
             {
@@ -207,8 +230,28 @@ class LLMCurriculumGenerator:
         class _WaveWithSnapshot(PracticeWavePlan):
             pass
 
+        def _gap_coverage_check(plan: PracticeWavePlan) -> str | None:
+            """T13：存在 open gap 时，波内任务必须覆盖至少一个 gap 的受影响维度。"""
+            if not view.gaps:
+                return None
+            affected = {
+                c.split("_", 1)[0]
+                for g in view.gaps
+                for c in g.affected_capabilities
+            }
+            wave_dims = {t.id.split("_", 1)[0] for t in plan.tasks}
+            if wave_dims & affected:
+                return None
+            return (
+                f"open gap 未被覆盖: gaps 需要维度 {sorted(affected)} 的针对性练习，"
+                f"波内任务只覆盖 {sorted(wave_dims)}"
+            )
+
         plan: PracticeWavePlan = await self._infer_validated(
-            messages, PracticeWavePlan.json_schema_hint(), _WaveWithSnapshot
+            messages,
+            PracticeWavePlan.json_schema_hint(),
+            _WaveWithSnapshot,
+            post_check=_gap_coverage_check,
         )
         # 快照 id 由运行时提供，不信任 LLM 回显
         plan = plan.model_copy(

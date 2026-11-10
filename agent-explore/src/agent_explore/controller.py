@@ -48,6 +48,8 @@ class PracticeOutcome(BaseModel):
     family: str = "variant"
     status: Literal["passed", "failed", "error"] = "failed"
     evidence_refs: list[str] = []
+    actions: list[dict] = []  # 动作轨迹（capability_id/arguments/status）——reflector 因果依据
+    verifier_checks: list[dict] = []  # 验收反馈（含失败 detail）——环境反馈信号
     error: dict | None = None
 
 
@@ -62,10 +64,37 @@ class ExplorationReport(BaseModel):
     conflict_hints: list[dict] = []
 
 
+class _CallCursor:
+    """对 CountingAdapter.calls 取增量（V2 §6.2 真实调用计量，替换 V1 占位计数）。
+
+    app_context["model_counter"] 缺席（未接线计数适配器）时增量为 0——
+    tokens 维度不计量，actions 维度不受影响。
+    """
+
+    def __init__(self, counter) -> None:
+        self._counter = counter
+        self._last = counter.calls if counter is not None else 0
+
+    def take(self) -> int:
+        if self._counter is None:
+            return 0
+        delta = self._counter.calls - self._last
+        self._last = self._counter.calls
+        return delta
+
+
 def _diagnose(outcome: PracticeOutcome) -> dict:
     if outcome.status == "error":
         return {"type": "verification_gap", "note": outcome.error or "执行异常"}
     if outcome.status == "failed":
+        # T14 维度感知：extract/export 失败多为错误因果模型（双栏/丢页陷阱）→
+        # contrast 族针对性练习；其余失败保持缺前置技能诊断
+        dimension = outcome.task_id.split("_", 1)[0]
+        if dimension in ("extract", "export"):
+            return {
+                "type": "wrong_causal_model",
+                "note": f"{dimension} 维度练习未过：疑似错误因果模型",
+            }
         return {"type": "missing_prerequisite", "note": "练习未过验收"}
     if outcome.family == TaskFamily.TARGET_ATTEMPT.value:
         return {"type": "fragile_success", "note": "目标达成但可能脆弱"}
@@ -124,6 +153,7 @@ class ExplorationController:
         hints: list[dict],
     ) -> None:
         max_waves = policy.max_waves or 2
+        cursor = _CallCursor(app_context.get("model_counter"))
         for wave_n in range(max_waves):
             view = await self._assembler.assemble(
                 mode="broad",
@@ -149,7 +179,9 @@ class ExplorationController:
                 practice_pool=app_context.get("practice_pool"),
             )
 
-            outcomes = await self._run_wave(plan.tasks, verifier, app_context)
+            outcomes = await self._run_wave(
+                plan.tasks, verifier, app_context, parallelism=plan.wave.parallelism
+            )
             report.waves_executed += 1
             report.tasks_executed += len(outcomes)
             report.tasks_passed += sum(1 for o in outcomes if o.status == "passed")
@@ -160,10 +192,8 @@ class ExplorationController:
             report.conflict_hints = list(hints)
             report.candidates_generated += generated
 
-            meter.consume(
-                actions=len(plan.tasks),
-                tokens=sum(1 for _ in plan.tasks),  # V1 粗估：占位计数
-            )
+            # 真实调用计量（§6.2）：本波 should_stop/plan/practice 的全部模型调用
+            meter.consume(actions=len(plan.tasks), tokens=cursor.take())
             if meter.status.exhausted:
                 break
 
@@ -192,21 +222,27 @@ class ExplorationController:
         return opened
 
     async def _run_wave(
-        self, tasks: list[PracticeTask], verifier: Verifier, app_context: dict
+        self,
+        tasks: list[PracticeTask],
+        verifier: Verifier,
+        app_context: dict,
+        parallelism: int = 4,
     ) -> list[PracticeOutcome]:
-        """并行执行；单任务异常收进 outcome（status=error），不杀姊妹任务。"""
+        """并行执行（Semaphore 限并发）；单任务异常收进 outcome（status=error），不杀姊妹任务。"""
+        gate = asyncio.Semaphore(max(1, parallelism))  # clamp 防 LLM 输出 0/负值死锁
 
         async def _one(task: PracticeTask) -> PracticeOutcome:
-            try:
-                return await self._run_practice(task, verifier, app_context)
-            except Exception as e:  # noqa: BLE001 — 波内隔离
-                return PracticeOutcome(
-                    task_id=task.id,
-                    title=task.title,
-                    family=task.family.value,
-                    status="error",
-                    error={"reason": f"{type(e).__name__}: {e}"},
-                )
+            async with gate:
+                try:
+                    return await self._run_practice(task, verifier, app_context)
+                except Exception as e:  # noqa: BLE001 — 波内隔离
+                    return PracticeOutcome(
+                        task_id=task.id,
+                        title=task.title,
+                        family=task.family.value,
+                        status="error",
+                        error={"reason": f"{type(e).__name__}: {e}"},
+                    )
 
         return list(await asyncio.gather(*(_one(t) for t in tasks)))
 
@@ -234,11 +270,27 @@ class ExplorationController:
         runtime: AgentRuntime = app_context["runtime"]
         agent: AgentSpec = app_context["agent"]
         run = await runtime.submit(spec, agent)
-        evidence_refs = [
-            e.payload.get("evidence_refs", [])
-            async for e in runtime._log.iter_events(run.id)
-            if e.type == "ActionSucceeded"
-        ]
+        evidence_refs: list[list[str]] = []
+        proposed: dict[str, dict] = {}
+        actions: list[dict] = []
+        verifier_checks: list[dict] = []
+        async for e in runtime.events(run.id):
+            if e.type == "ActionProposed":
+                proposed[e.subject_id] = {
+                    "capability_id": e.payload.get("capability_id"),
+                    "arguments": e.payload.get("arguments", {}),
+                }
+            elif e.type in ("ActionSucceeded", "ActionFailed"):
+                actions.append(
+                    {
+                        **proposed.get(e.subject_id, {}),
+                        "status": "succeeded" if e.type == "ActionSucceeded" else "failed",
+                    }
+                )
+            elif e.type == "RunVerified":
+                verifier_checks = list(e.payload.get("checks", []))
+            if e.type == "ActionSucceeded":
+                evidence_refs.append(e.payload.get("evidence_refs", []))
         flat = [ref for group in evidence_refs for ref in group]
         status = "passed" if run.state.value == "succeeded" else "failed"
         return PracticeOutcome(
@@ -247,6 +299,8 @@ class ExplorationController:
             family=task.family.value,
             status=status,
             evidence_refs=flat,
+            actions=actions,
+            verifier_checks=verifier_checks,
         )
 
     # ---------- 记忆合并（BRS 波后按序 / DRS 每步） ----------
@@ -326,6 +380,7 @@ class ExplorationController:
             family=TaskFamily.TARGET_ATTEMPT.value,
             status="failed",
         )
+        cursor = _CallCursor(app_context.get("model_counter"))
         for _step in range(app_context.get("policy_max_deep", 3)):
             view = await self._assembler.assemble(
                 mode="deep",
@@ -354,7 +409,7 @@ class ExplorationController:
             _, generated = await self._merge_outcomes([produced], [new_outcome], app_context)
             report.candidates_generated += generated
 
-            meter.consume(actions=1, tokens=1)
+            meter.consume(actions=1, tokens=cursor.take())
             prev_task = {
                 "id": produced.id,
                 "family": produced.family.value,

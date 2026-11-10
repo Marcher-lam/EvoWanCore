@@ -105,3 +105,130 @@ def test_random_helper_isolated() -> None:
     before = random.getstate()
     generate_corpus(seed=42, size=4, difficulty=0.3)
     assert random.getstate() == before
+
+
+# ---------- T17：页级对比度 + 渲染增强 ----------
+
+
+def test_pages_have_contrast() -> None:
+    """难度 0.8 的扫描文档存在 contrast<0.5 页（感知陷阱载体）；所有页带 contrast。"""
+    corpus = generate_corpus(seed=5, size=12, difficulty=0.8)
+    scan_docs = [d for d in corpus.documents if d["kind"] == "scan"]
+    assert scan_docs, "高难语料应含扫描件"
+    assert any(
+        p.get("contrast", 1.0) < 0.5 for d in scan_docs for p in d["pages"]
+    ), "扫描文档应存在低对比度页（contrast<0.5）"
+    for doc in corpus.documents:
+        for page in doc["pages"]:
+            assert isinstance(page.get("contrast"), float), "每页必须带 contrast"
+            assert 0.0 < page["contrast"] <= 1.0
+
+
+def test_render_enhanced_deterministic() -> None:
+    """增强渲染：同种子逐字节确定；对比度必须影响渲染（浅色文字=感知差异载体）。"""
+    from examples.docworkbench.generator import _render_png
+
+    a = generate_corpus(seed=9, size=8, difficulty=0.8)
+    b = generate_corpus(seed=9, size=8, difficulty=0.8)
+    assert a.assets == b.assets, "渲染必须同种子逐字节确定"
+
+    doc = next(d for d in a.documents if d["kind"] == "scan")
+    lifted = _render_png(
+        {
+            **doc,
+            "pages": [{**p, "contrast": 1.0} for p in doc["pages"]],
+            "fields": [{**f, "contrast": 1.0} for f in doc["fields"]],
+        }
+    )
+    assert lifted != a.assets[doc["id"]], "对比度必须影响渲染输出"
+
+
+# ---------- T18：image-based extract ----------
+
+
+def test_image_extract_tool_returns_no_values() -> None:
+    """感知化抽取工具只回图片引用与页对比度——字段值不得进入工具通道。"""
+    import json as _json
+
+    from examples.docworkbench.tools import extract_fields_from_image
+
+    corpus = generate_corpus(seed=5, size=8, difficulty=0.8)
+    doc = next(d for d in corpus.documents if d["kind"] == "scan")
+    out = extract_fields_from_image(doc)
+    assert out["image_ref"] == doc["id"]
+    assert out["pages"] and all(
+        set(p) == {"page", "contrast"} for p in out["pages"]
+    ), "页清单只含 page/contrast"
+    blob = _json.dumps(out)
+    for f in doc["fields"]:
+        assert str(f["value"]) not in blob, "字段值不得泄漏进工具输出"
+
+
+def test_acceptance_judges_submitted_fields() -> None:
+    """extract 判分改对提交交付：真值 pass、错值 fail；convert(dpi>=150) 提升页对比度。"""
+    from examples.docworkbench.tools import convert_format
+
+    corpus = generate_corpus(seed=5, size=8, difficulty=0.8)
+    task = next(t for t in corpus.tasks if t["dimension"] == "extract")
+    doc = next(d for d in corpus.documents if d["id"] == task["doc_id"])
+    truth = {f["name"]: f["value"] for f in doc["fields"]}
+
+    right = run_acceptance(task["id"], {"doc_id": doc["id"], "fields": truth}, corpus)
+    assert right.passed, "提交真值应通过"
+    poisoned = {**truth, next(iter(truth)): "__WRONG__"}
+    wrong = run_acceptance(task["id"], {"doc_id": doc["id"], "fields": poisoned}, corpus)
+    assert not wrong.passed, "提交错值应失败"
+
+    conv = convert_format(doc, dpi=200)
+    assert all(p["contrast"] == 1.0 for p in conv["pages"]), "convert(dpi>=150) 应提升页对比度"
+    low = convert_format(doc, dpi=100)
+    assert any(p.get("contrast", 1.0) < 1.0 for p in low["pages"]) or low["lossy"], (
+        "低 dpi 不提升对比度（且扫描件丢字段）"
+    )
+
+
+def test_perception_constraint_registered() -> None:
+    """T20：第四隐藏约束（低对比度感知陷阱）进入真值表，claim 键机器可判。"""
+    entry = next(
+        (c for c in HIDDEN_CONSTRAINTS if c["id"] == "perception_low_contrast"), None
+    )
+    assert entry, "真值表须含 perception_low_contrast"
+    assert entry["dimension"] == "extract"
+    assert entry["claim"] == {
+        "action": "convert_format", "param": "dpi", "op": ">=", "value": 150,
+    }, "claim 键须与 convert 提升对比度的实际机制一致"
+    assert all(c.get("claim") for c in HIDDEN_CONSTRAINTS), "既有约束均须带 claim 键"
+
+
+def test_image_extract_in_heldout() -> None:
+    """T22：extract 任务带 image_required 标记进语料；切分后练习/保留两侧都含。"""
+    corpus = generate_corpus(seed=11, size=12, difficulty=0.8, perceptual=True)
+    extracts = [t for t in corpus.tasks if t["dimension"] == "extract"]
+    assert extracts, "语料须含 extract 任务"
+    assert all(t.get("image_required") is True for t in extracts), (
+        "感知语料的 extract 任务必须全部 image-based（字段值只在渲染 PNG）"
+    )
+    text_corpus = generate_corpus(seed=11, size=12, difficulty=0.8)
+    assert all(
+        not t.get("image_required") for t in text_corpus.tasks
+    ), "文本语料（默认）不带视觉标记——B 检查点语义保持"
+    other = [t for t in corpus.tasks if t["dimension"] != "extract"]
+    assert all(not t.get("image_required") for t in other), "非 extract 任务不带视觉标记"
+
+    practice, heldout = split_corpus(corpus, 0.5)
+    assert any(t["dimension"] == "extract" for t in practice.tasks), "练习池含 image extract"
+    assert any(t["dimension"] == "extract" for t in heldout.tasks), "保留集含 image extract"
+
+
+def test_perceptual_extract_docs_carry_trap() -> None:
+    """T23 迭代 4：感知语料中 extract 维度文档结构性带陷阱（扫描件+低对比度页）——
+    门的验证场与保留集评分不再依赖扫描概率彩票。"""
+    corpus = generate_corpus(seed=41, size=8, difficulty=0.8, perceptual=True)
+    # 维度按文档索引轮转（generator 不变量），extract 文档 = i%4==1
+    extract_docs = [corpus.documents[i] for i in range(len(corpus.documents)) if i % 4 == 1]
+    assert extract_docs
+    for doc in extract_docs:
+        assert doc["kind"] == "scan", "感知语料 extract 文档必须是扫描件"
+        assert any(p.get("contrast", 1.0) < 0.5 for p in doc["pages"]), (
+            "extract 扫描文档必须含低对比度页（陷阱载体）"
+        )

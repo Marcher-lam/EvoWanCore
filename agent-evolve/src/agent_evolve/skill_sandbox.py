@@ -20,6 +20,9 @@ from pydantic import BaseModel
 
 MAX_STDOUT_BYTES = 1024 * 1024
 
+# A#1：macOS sandbox-exec 网络 deny profile——其余默认放行，仅网络全拒
+_NETWORK_DENY_PROFILE = "(version 1)(allow default)(deny network*)"
+
 
 class SkillArtifact(BaseModel):
     skill_id: str
@@ -81,11 +84,26 @@ class SkillSandbox:
         *,
         memory_limit_mb: int | None = None,
         cpu_limit_s: bool = False,
+        network: Literal["deny", "allow"] = "deny",
     ) -> None:
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
         self._memory_limit_mb = memory_limit_mb
         self._cpu_limit_s = cpu_limit_s
+        self._network = network
+        if network == "deny" and sys.platform not in ("darwin", "linux"):
+            raise ValueError(
+                f"网络隔离不支持平台 {sys.platform}：显式报错，不静默跳过"
+                "（如需无隔离运行请显式传 network='allow'）"
+            )
+
+    def _wrap_argv(self, argv: list[str]) -> list[str]:
+        """A#1：network=deny 的平台包装器（macOS sandbox-exec / Linux unshare -n）。"""
+        if self._network != "deny":
+            return argv
+        if sys.platform == "darwin":
+            return ["/usr/bin/sandbox-exec", "-p", _NETWORK_DENY_PROFILE, *argv]
+        return ["unshare", "--net", *argv]
 
     @staticmethod
     def _safe_component(value: str, what: str) -> str:
@@ -121,9 +139,7 @@ class SkillSandbox:
         t0 = time.monotonic()
         preexec = _make_preexec(self._memory_limit_mb, self._cpu_limit_s)
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(entry),
-            json.dumps(args),
+            *self._wrap_argv([sys.executable, str(entry), json.dumps(args)]),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,  # 独立进程组，便于整组击杀
@@ -194,4 +210,7 @@ class SkillSandbox:
                 {"name": name, "kind": "failure_scenario", "ok": ok, "status": result.status}
             )
 
+        # M10：expected_outputs 与 failure_scenarios 皆空 → 不得 vacuous pass
+        if not cases:
+            cases.append({"name": "_empty_contract", "kind": "vacuous_guard", "ok": False})
         return ContractTestReport(passed=all(c["ok"] for c in cases), cases=cases)

@@ -102,14 +102,14 @@ async def test_custom_verifier(tmp_path: Path, corpus) -> None:
         async def verify_task(self, task, evidence_refs):
             return VerificationResult(passed=False, checks=[{"strict": "拒绝一切"}])
 
-    # 通过继承组装注入（build_app 的开放面：runtime 构造参数全部可换）
+    # M8：verifier 经 build_app 公有参数注入（不再戳 _runtime._verifier）
     app = build_app(
         model_adapter=_adapter([_give_up()]),
         db_path=tmp_path / "strict.db",
         blob_dir=tmp_path / "blobs",
         corpus=corpus,
+        verifier=StrictVerifier(),
     )
-    app._runtime._verifier = StrictVerifier()  # noqa: SLF001 — 验收测试验证可替换性
     run = await app.solve(task)
     assert run.state.value == "failed"  # 自定义验收器说了算
 
@@ -127,3 +127,97 @@ async def test_run_with_exploration_disabled(tmp_path: Path, corpus) -> None:
     assert run.state.value in ("succeeded", "failed")
     rules = await app._memory_store.query("rules", {})  # noqa: SLF001
     assert rules == [], "未启用探索不得写入长期记忆"
+
+
+async def test_public_events_api(tmp_path: Path, corpus) -> None:  # noqa: ARG001
+    """⑤ M8：公有 events() 事件流 + rebind() 覆盖绑定——消费面不触私有属性。"""
+    from agent_core.evidence import SqliteEvidenceStore
+    from agent_core.models import ModelGateway
+    from agent_core.policy import DefaultPolicyEngine
+    from agent_core.runtime.driver import AgentSpec
+    from agent_core.runtime.eventlog import SqliteEventLog
+    from agent_core.runtime.runtime import AgentRuntime
+    from agent_core.runtime.statestore import SqliteStateStore
+    from agent_core.task import TaskSpec
+
+    class _OKVerifier:
+        async def verify_action(self, request, result):  # noqa: ARG002
+            return VerificationResult(passed=True)
+
+        async def verify_task(self, task, evidence_refs):  # noqa: ARG002
+            return VerificationResult(passed=True)
+
+    registry = InMemoryCapabilityRegistry()
+
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    async def handler_v2(args):  # noqa: ARG001
+        return {"ok": True, "v2": True}
+
+    registry.bind(
+        CapabilityDescriptor(
+            id="noop_tool",
+            type=CapabilityType.TOOL,
+            name="空操作",
+            input_schema={},
+            auth_scope=[],
+            tags=["pub"],
+        ),
+        handler,
+    )
+    # rebind：显式覆盖既有绑定；未注册 id 必须被拒
+    registry.rebind(
+        CapabilityDescriptor(
+            id="noop_tool",
+            type=CapabilityType.TOOL,
+            name="空操作",
+            input_schema={},
+            auth_scope=[],
+            tags=["pub"],
+        ),
+        handler_v2,
+    )
+    assert registry.handler_for("noop_tool") is handler_v2
+    with pytest.raises(KeyError):
+        registry.rebind(
+            CapabilityDescriptor(
+                id="never_bound",
+                type=CapabilityType.TOOL,
+                name="未注册",
+                input_schema={},
+                auth_scope=[],
+            ),
+            handler,
+        )
+
+    gateway = ModelGateway()
+    gateway.register(_adapter([
+        InferResponse(tool_calls=[{"id": "c1", "name": "noop_tool", "arguments": {}}]),
+        InferResponse(text="done"),  # 动作执行后的第二轮提议：交卷转验证
+    ]))
+    runtime = AgentRuntime(
+        gateway=gateway,
+        registry=registry,
+        policy_engine=DefaultPolicyEngine(),
+        event_log=SqliteEventLog(tmp_path / "evlog.db"),
+        state_store=SqliteStateStore(tmp_path / "st.db"),
+        evidence_store=SqliteEvidenceStore(tmp_path / "ev.db", tmp_path / "blobs"),
+        verifier=_OKVerifier(),
+    )
+    spec = TaskSpec(
+        id="spec_pub",
+        kind="noop",
+        goal={},
+        input_schema={},
+        constraints={},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    run = await runtime.submit(spec, AgentSpec(id="a_pub", role="worker", model_id="m-app"))
+
+    events = [e async for e in runtime.events(run.id)]
+    types = [e.type for e in events]
+    assert "RunCreated" in types and "ActionDispatched" in types
+    # rebind 生效：派发命中的是覆盖后的 handler
+    succeeded = next(e for e in events if e.type == "ActionSucceeded")
+    assert succeeded.payload["output"]["v2"] is True

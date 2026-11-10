@@ -80,3 +80,11 @@ def test_models_are_pydantic() -> None:
     assert Evidence.model_validate_json(ev.model_dump_json()) == ev
     seg = Asset(id="a", kind="image", storage_ref="x", sha256="h", source="t")
     assert seg.kind == "image"
+
+
+async def test_trace_lineage_empty_refs(store: SqliteEvidenceStore) -> None:
+    """M3: 空 observation_refs 的证据 → 空 lineage，不炸 SQL。"""
+    ev_id = await store.write_evidence(claim={"s": 1}, observation_refs=[], derivation={})
+    lineage = await store.trace_lineage(ev_id)
+    assert lineage["evidence"]["claim"] == {"s": 1}
+    assert lineage["observations"] == []

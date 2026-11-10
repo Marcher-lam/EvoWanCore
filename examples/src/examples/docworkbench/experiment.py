@@ -28,6 +28,8 @@ class ExperimentConfig:
     adapter_factory: Callable[[int], ModelAdapter] | None = None
     workdir: Path | None = None
     max_waves: int = 4
+    use_llm_reflector: bool = False  # V2 B 检查点：真 LLM 反思（T10）
+    use_fake_vlm: bool = False  # v3 感知实验：WorkbenchFakeVLM 读图（T23）
 
 
 class ArmReport(BaseModel):
@@ -156,6 +158,14 @@ def _arm_stats(
     )
 
 
+def _vlm_factory(config: ExperimentConfig):
+    if not config.use_fake_vlm:
+        return None
+    from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
+
+    return lambda corpus, derived: WorkbenchFakeVLM(corpus, derived)
+
+
 async def _explore_arm(
     config: ExperimentConfig, seed: int, corpus, practice, heldout
 ) -> tuple[ArmReport, list[tuple[dict, float]]]:
@@ -171,7 +181,13 @@ async def _explore_arm(
         blob_dir=workdir / "blobs",
         corpus=corpus,
         practice_part=practice,
+        vlm_factory=_vlm_factory(config),
     )
+    if config.use_llm_reflector:
+        from agent_explore.reflector import LLMReflector
+
+        # 共享 app gateway：reflector 调用经 CountingAdapter 计入真实预算（§6.2）
+        app.use_reflector(LLMReflector(gateway=app.gateway, model_id="m-app"))
     report = await app.explore(
         ExplorationPolicy(mode="broad", budget=config.budget_w, max_waves=config.max_waves)
     )
@@ -197,15 +213,24 @@ async def _retry_arm(
         blob_dir=workdir / "blobs",
         corpus=corpus,
         practice_part=practice,
+        heldout_part=heldout,
+        vlm_factory=_vlm_factory(config),
     )
     meter = BudgetMeter(config.budget_w)
+    counter = app.model_counter  # §6.2：重试臂计真实 solve 调用
+    last_calls = counter.calls if counter else 0
     attempts = 0
     i = 0
     practice_tasks = practice.tasks or corpus.tasks
     while not meter.status.exhausted:
         task = practice_tasks[i % len(practice_tasks)]
         await app.solve(task)  # 直接重试：不写长期记忆（app 只在 explore 时写入）
-        meter.consume(actions=1, tokens=1)
+        meter.consume(
+            actions=1,
+            tokens=(counter.calls - last_calls) if counter else 0,
+        )
+        if counter:
+            last_calls = counter.calls
         attempts += 1
         i += 1
         if attempts > 1000:  # 安全阀
@@ -238,5 +263,17 @@ async def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         name: _arm_stats(name, pairs, spent[name], attempts[name])
         for name, pairs in all_pairs.items()
     }
-    comparable = spent["explore"].get("actions", 0) == spent["retry"].get("actions", 0)
+    # C1（§6.2）：W 以真实调用计数计量（max_tokens=每种子调用预算）时，
+    # comparable = 两臂都打满同一 W；否则回退 V1 动作等量口径
+    w_calls = config.budget_w.max_tokens
+    if w_calls is not None:
+        need = w_calls * len(config.seeds)
+        comparable = (
+            spent["explore"].get("tokens", 0) >= need
+            and spent["retry"].get("tokens", 0) >= need
+        )
+    else:
+        comparable = (
+            spent["explore"].get("actions", 0) == spent["retry"].get("actions", 0)
+        )
     return ExperimentReport(seeds=config.seeds, arms=arms, comparable=comparable)

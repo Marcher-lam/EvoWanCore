@@ -126,3 +126,75 @@ async def test_rollback_generates_inverse_manifest(controller, tmp_path) -> None
     dead = await store.get("mem_abc")
     assert dead.lifecycle.value == "expired"
     assert "反例" in dead.content["invalidated_because"]
+
+
+# ---------- T8（M10）：演化态持久化 ----------
+
+
+class _MemEventLog:
+    """测试用事件日志：append 进列表。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def append(self, event) -> None:
+        self.events.append(event)
+
+
+async def test_evolution_state_survives_restart(tmp_path) -> None:
+    """M10：candidates/manifests 落 SQLite——新实例可 rollback 旧 manifest。"""
+    from agent_core.memory.record import MemoryKind, MemoryRecord
+
+    mem = SqliteMemoryStore(tmp_path / "mem.db")
+    await mem.put(
+        MemoryRecord(
+            id="mem_abc",
+            kind=MemoryKind.RULE,
+            namespace="rules",
+            content={"statement": "导出前需确认选区"},
+            evidence_refs=["evi"],
+        )
+    )
+    c1 = EvolutionController(
+        memory_store=mem,
+        memory_publisher=VersionedPublisher(mem),
+        db_path=tmp_path / "evo.db",
+    )
+    cid = c1.submit(_memory_candidate())
+    good = EvalReport(
+        mini_batch_scores=[0.9], parent_scores=[0.5], improved=True, regression_violations=[]
+    )
+    manifest = await c1.publish(cid, good, memory_snapshot_id="snap_before")
+    # publish 写 NS_RELEASES 记录
+    releases = await mem.query("releases", {})
+    assert any(r.id == manifest.release_id for r in releases), "发布应写 releases 命名空间记录"
+
+    # 崩溃重启：新实例同一 db_path，旧 manifest 可回滚
+    c2 = EvolutionController(
+        memory_store=mem,
+        memory_publisher=VersionedPublisher(mem),
+        db_path=tmp_path / "evo.db",
+    )
+    inverse = await c2.rollback(manifest.release_id, reason="重启后回滚")
+    assert inverse.rollback_of == manifest.release_id
+    dead = await mem.get("mem_abc")
+    assert dead.lifecycle.value == "expired"
+
+
+async def test_publish_denied_writes_event(tmp_path) -> None:
+    """M10：拒绝发布时写 PublishDenied 事件进（可选注入的）EventLog。"""
+    mem = SqliteMemoryStore(tmp_path / "mem.db")
+    log = _MemEventLog()
+    controller = EvolutionController(
+        memory_store=mem,
+        memory_publisher=VersionedPublisher(mem),
+        event_log=log,
+    )
+    cid = controller.submit(_memory_candidate())
+    bad = EvalReport(
+        mini_batch_scores=[0.3], parent_scores=[0.5], improved=False, regression_violations=[]
+    )
+    with pytest.raises(PublishDenied):
+        await controller.publish(cid, bad)
+    assert [e.type for e in log.events] == ["PublishDenied"]
+    assert log.events[0].subject_id == cid

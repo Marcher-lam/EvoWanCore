@@ -342,3 +342,211 @@ def test_reserved_contracts_importable() -> None:
 
     assert ExecutionPolicy is not None
     assert ModelLoopPolicy is not None
+
+
+async def test_cancel_during_verify_yields_cancelled(tmp_path: Path) -> None:
+    """M7: verify 进行中收到 cancel → 最终 CANCELLED，不被过期内存态覆盖。"""
+    import asyncio
+
+    from agent_core.runtime.driver import VerificationResult
+
+    entered_verify = asyncio.Event()
+    release_verify = asyncio.Event()
+
+    class SlowVerifier:
+        async def verify_action(self, request, result):
+            return VerificationResult(passed=True)
+
+        async def verify_task(self, task, evidence_refs):
+            entered_verify.set()
+            await release_verify.wait()
+            return VerificationResult(passed=True)
+
+    async def handler(args):
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text="done")],
+        handler=handler,
+        verifier=SlowVerifier(),
+    )
+
+    # 先落一个 RUNNING run，再启动 verify——顺序错误会造成测试自身竞态
+    from agent_core.run import RunHandle, RunState
+    from agent_core.task import TaskHandle
+
+    run = RunHandle(id="run_manual", task_id="task_manual", agent_id="a1", state=RunState.RUNNING)
+    await env.state_store.save_task(TaskHandle(id="task_manual", spec_id="spec_manual"))
+    await env.state_store.save_run(run)
+
+    verify_task = asyncio.create_task(env.runtime.verify_and_finish("run_manual"))
+    await asyncio.wait_for(asyncio.create_task(entered_verify.wait()), timeout=2)
+    await env.runtime.cancel("run_manual")  # verify 挂起期间取消
+    release_verify.set()
+    final = await verify_task
+    assert final.state.value == "cancelled"
+
+
+# ---------- T6：resume 续跑剩余步骤 ----------
+
+
+async def test_resume_continues_remaining_steps(tmp_path: Path) -> None:
+    """两动作任务：第一动作完成后崩溃 → resume 重建 context 续跑主循环，
+    第二动作执行且两个动作各只派发一次。"""
+    gate = asyncio.Event()
+
+    class _GatedSecondInfer:
+        """第二次 infer 挂起：精确制造"第一动作完成、第二动作提议前"的崩溃窗口。"""
+
+        def __init__(self, fake: FakeModelAdapter) -> None:
+            self._fake = fake
+            self.calls = 0
+
+        def capabilities(self):
+            return self._fake.capabilities()
+
+        async def infer(self, request):
+            self.calls += 1
+            if self.calls == 2:
+                await gate.wait()
+            return await self._fake.infer(request)
+
+    async def handler(args):
+        return {"step": args.get("step", 0)}
+
+    env1 = Env(
+        tmp_path,
+        responses=[
+            InferResponse(
+                tool_calls=[{"id": "c1", "name": "extract_fields", "arguments": {"step": 1}}]
+            ),
+        ],
+        handler=handler,
+    )
+    gated_gw = ModelGateway()
+    gated_gw.register(_GatedSecondInfer(env1.fake))
+    rt1 = AgentRuntime(
+        gateway=gated_gw,
+        registry=env1.registry,
+        policy_engine=DefaultPolicyEngine(),
+        event_log=env1.event_log,
+        state_store=env1.state_store,
+        evidence_store=env1.evidence,
+        verifier=StubVerifier(passed=True),
+    )
+    submit_task = asyncio.create_task(rt1.submit(_spec(), env1.agent()))
+
+    # 等第一动作完成且检查点落盘（history 1 条、pending 清空、含 task 子集）
+    run_id = None
+    checkpoint = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        async for e in env1.event_log.iter_events():
+            if e.type == "ActionSucceeded":
+                run_id = e.correlation_id
+        if run_id:
+            cp = await env1.state_store.load_latest_checkpoint(run_id)
+            if cp and len(cp.get("history", [])) >= 1 and not cp.get("pending"):
+                checkpoint = cp
+                break
+    assert checkpoint, "第一动作完成后应有检查点（history≥1，pending 空）"
+    assert checkpoint.get("task", {}).get("id") == "spec_extract"  # context 子集持久化
+
+    submit_task.cancel()  # 崩溃：挂在第二次 infer（第二动作尚未提议）
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+    gate.set()
+
+    # 重启：新 runtime 实例共享持久化；模型脚本给第二动作提案 + 收尾
+    env2 = Env(
+        tmp_path,
+        responses=[
+            InferResponse(
+                tool_calls=[{"id": "c2", "name": "extract_fields", "arguments": {"step": 2}}]
+            ),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    rt2 = AgentRuntime(
+        gateway=env2.gateway,
+        registry=env2.registry,
+        policy_engine=DefaultPolicyEngine(),
+        event_log=env1.event_log,
+        state_store=env1.state_store,
+        evidence_store=env1.evidence,
+        verifier=StubVerifier(passed=True),
+    )
+    run = await rt2.resume(run_id)
+
+    assert run.state.value == "succeeded"
+    events = [e async for e in env1.event_log.iter_events(run_id)]
+    dispatched = [e for e in events if e.type == "ActionDispatched"]
+    succeeded = [e for e in events if e.type == "ActionSucceeded"]
+    assert len(dispatched) == 2, "两动作各只派发一次（崩溃不重发，恢复续跑第二动作）"
+    assert len(succeeded) == 2
+    assert not any(e.type == "ActionOutcomeUnknown" for e in events)  # 崩溃时无在途动作
+
+
+# ---------- T21：多模态消息构造 + VLM 路由 ----------
+
+
+async def test_vision_task_routes_to_vlm() -> None:
+    """vision 约束任务：消息含 image content part，且路由命中 VLM（文本适配器不接）。"""
+    from agent_core.run import RunHandle
+
+    text_fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-text", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+        [InferResponse(text="text agent")],
+    )
+    vlm_fake = FakeModelAdapter(
+        ModelCapabilities(
+            model_id="m-vlm", inputs={Modality.TEXT, Modality.IMAGE}, tools={"native_tool_call"}
+        ),
+        [InferResponse(text="vlm read")],
+    )
+    gw = ModelGateway()
+    gw.register(text_fake)
+    gw.register(vlm_fake)
+    policy = ModelLoopPolicy(
+        gateway=gw, agent=AgentSpec(id="a_v", role="worker", model_id="m-text")
+    )
+    vision_spec = TaskSpec(
+        id="spec_vision",
+        kind="wb:extract-image",
+        goal={"what": "读图抽取"},
+        input_schema={},
+        constraints={"vision": True, "image_url": "data:image/png;base64,QUJD"},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    run = RunHandle(task_id="task_spec_vision", agent_id="a_v")
+    context: dict = {
+        "task": vision_spec,
+        "capability_schemas": [],
+        "history": [],
+        "memory": "",
+        "pending": [],
+    }
+
+    await policy.propose_next_actions(run, context)
+    assert len(vlm_fake.recorded_requests) == 1, "视觉任务必须路由到 VLM"
+    assert len(text_fake.recorded_requests) == 0, "文本适配器不应接到视觉任务"
+    import json as _json
+
+    blob = _json.dumps([m for m in vlm_fake.recorded_requests[0].messages])
+    assert "image_url" in blob and "data:image/png;base64,QUJD" in blob, (
+        "消息必须携带 image content part（data URL）"
+    )
+
+    plain_spec = TaskSpec(
+        id="spec_plain",
+        kind="wb:export",
+        goal={"what": "导出"},
+        input_schema={},
+        constraints={},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    await policy.propose_next_actions(run, {**context, "task": plain_spec})
+    assert len(text_fake.recorded_requests) == 1, "非视觉任务仍走文本适配器"
+    assert len(vlm_fake.recorded_requests) == 1

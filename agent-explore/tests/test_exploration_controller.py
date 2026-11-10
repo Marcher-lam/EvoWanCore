@@ -21,7 +21,11 @@ from agent_core.runtime.eventlog import SqliteEventLog
 from agent_core.runtime.runtime import AgentRuntime
 from agent_core.runtime.statestore import SqliteStateStore
 from agent_core.task import TaskSpec
-from agent_explore.controller import ExplorationController, ExplorationPolicy
+from agent_explore.controller import (
+    ExplorationController,
+    ExplorationPolicy,
+    PracticeOutcome,
+)
 from agent_explore.curriculum import LLMCurriculumGenerator
 from agent_explore.curriculum_memory import DefaultAssembler
 from agent_explore.gaps import SqliteGapLedger
@@ -380,3 +384,77 @@ async def test_practice_goal_carries_doc_context_from_pool(tmp_path: Path) -> No
         m["content"] for r in env.fake.recorded_requests for m in r.messages
     )
     assert "doc_9" in all_content, "练习 goal 必须带 doc_id"
+
+
+async def test_wave_parallelism_enforced(tmp_path: Path) -> None:
+    """M9a: parallelism 生效——并发峰值 ≤ 限值，波内任务全部完成。"""
+    import asyncio
+
+    tasks = [_task_json("variant", f"任务{i}") for i in range(4)]
+    plan = _wave_plan_json("x", tasks)  # parallelism=2（默认构造为 4，见下）
+    peak = {"now": 0, "max": 0}
+
+    class PeakVerifier(StubVerifier):
+        async def verify_task(self, task, evidence_refs):
+            peak["now"] += 1
+            peak["max"] = max(peak["max"], peak["now"])
+            await asyncio.sleep(0.02)
+            peak["now"] -= 1
+            return await super().verify_task(task, evidence_refs)
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text=plan)] + [InferResponse(text="done")] * 4,
+        verifier=PeakVerifier(),
+    )
+    report = await env.run(mode="broad", max_waves=1)
+    assert report.tasks_executed == 4
+    assert peak["max"] <= 2, f"并发峰值 {peak['max']} 超过 parallelism=2"
+
+
+def test_extract_failure_diagnoses_contrast() -> None:
+    """T14：extract/export 维度失败 → wrong_causal_model（→contrast 族）；其余 failed 保持。"""
+    from agent_explore.controller import _diagnose
+    from agent_explore.practice import DIAGNOSIS_FAMILY_MAP, DiagnosisType, TaskFamily
+
+    extract_fail = PracticeOutcome(task_id="extract_doc_3", status="failed")
+    export_fail = PracticeOutcome(task_id="export_doc_1", status="failed")
+    convert_fail = PracticeOutcome(task_id="convert_doc_1", status="failed")
+
+    assert _diagnose(extract_fail)["type"] == "wrong_causal_model"
+    assert _diagnose(export_fail)["type"] == "wrong_causal_model"
+    assert _diagnose(convert_fail)["type"] == "missing_prerequisite"
+    # 诊断映射到 contrast 任务族（双栏陷阱的针对性练习）
+    assert DIAGNOSIS_FAMILY_MAP[DiagnosisType.WRONG_CAUSAL_MODEL] is TaskFamily.CONTRAST
+
+
+async def test_practice_outcome_carries_action_trace(tmp_path: Path) -> None:
+    """T16 诊断迭代：PracticeOutcome 携带动作轨迹（reflector 推断因果的依据）。"""
+    from agent_core.capability import CapabilityDescriptor, CapabilityType
+
+    async def noop(args):  # noqa: ARG001
+        return {"ok": True}
+
+    tasks = [_task_json("variant", "t1")]
+    plan = _wave_plan_json("x", tasks)
+    env = Env(tmp_path, responses=[InferResponse(text=plan), InferResponse(text="done")])
+    env.registry.bind(
+        CapabilityDescriptor(
+            id="noop_tool", type=CapabilityType.TOOL, name="空操作",
+            input_schema={}, side_effect_level="read", auth_scope=[],
+        ),
+        noop,
+    )
+    from agent_core.models import InferResponse as IR
+
+    env.fake._responses.insert(
+        1, IR(tool_calls=[{"id": "c1", "name": "noop_tool", "arguments": {"x": 1}}])
+    )
+    seen: list = []
+    env.reflector = lambda task, outcome: (seen.append(outcome), [])[1]
+    await env.run(mode="broad", max_waves=1)
+    assert seen, "reflector 应收到 outcome"
+    trace = seen[0].actions
+    assert trace and trace[0]["capability_id"] == "noop_tool"
+    assert trace[0]["arguments"] == {"x": 1}
+    assert trace[0]["status"] in ("succeeded", "failed")

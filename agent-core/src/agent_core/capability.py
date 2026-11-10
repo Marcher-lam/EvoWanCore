@@ -54,6 +54,13 @@ class InMemoryCapabilityRegistry:
         self.register(descriptor)
         self._bindings[descriptor.id] = handler
 
+    def rebind(self, descriptor: CapabilityDescriptor, handler: object) -> None:
+        """M8：显式覆盖既有绑定（凭空新增必须走 bind，KeyError 拒绝）。"""
+        if descriptor.id not in self._by_id:
+            raise KeyError(f"能力未注册，先 bind 再 rebind: {descriptor.id}")
+        self._by_id[descriptor.id] = descriptor
+        self._bindings[descriptor.id] = handler
+
     def handler_for(self, capability_id: str):
         return self._bindings.get(capability_id)
 
@@ -63,7 +70,7 @@ class InMemoryCapabilityRegistry:
     def discover(self, query: dict) -> list[CapabilityDescriptor]:
         results = []
         for d in self._by_id.values():
-            if "type" in query and d.type is not query["type"]:
+            if "type" in query and d.type != query["type"]:
                 continue
             if "tags" in query and not set(query["tags"]) & set(d.tags):
                 continue

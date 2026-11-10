@@ -147,3 +147,74 @@ async def test_plan_wave_receives_practice_pool() -> None:
     content = " ".join(m["content"] for m in fake.recorded_requests[0].messages)
     assert "convert_doc_3_3" in content
     assert "extract_doc_1_1" in content
+
+
+# ---------- T13：gap→contrast 课程闭环（覆盖校验） ----------
+
+
+def _view_with_gap(dim: str = "extract") -> CurriculumMemoryView:
+    from agent_explore.gaps import Gap, GapType
+
+    return CurriculumMemoryView(
+        mode="broad",
+        gaps=[
+            Gap(
+                gap_type=GapType.KNOWLEDGE,
+                title=f"{dim} 练习未通过",
+                affected_capabilities=[f"{dim}_doc_3"],
+            )
+        ],
+    )
+
+
+def _plan_with_ids(snapshot_id: str, ids: list[str]) -> str:
+    tasks = []
+    for i in ids:
+        tasks.append(
+            {
+                "id": i,
+                "family": "contrast",
+                "title": f"针对性练习 {i}",
+                "objective": {"what": "覆盖 gap 维度"},
+                "acceptance": {
+                    "verifier_profile": "p",
+                    "required_evidence": [],
+                    "pass_conditions": [{"check": "done"}],
+                    "fail_conditions": [],
+                },
+            }
+        )
+    return json.dumps(
+        {"wave": {"shared_memory_snapshot_id": snapshot_id, "task_ids": [], "parallelism": 2},
+         "tasks": tasks}
+    )
+
+
+async def test_gap_drives_wave_coverage() -> None:
+    """存在 open gap：第一次计划不含 gap 维度 → 校验错误重试；第二次含 → 通过。"""
+    gen, fake = _generator(
+        [
+            InferResponse(text=_plan_with_ids("snap_1", ["export_doc_9"])),
+            InferResponse(text=_plan_with_ids("snap_1", ["extract_doc_9", "export_doc_9"])),
+        ]
+    )
+    plan = await gen.plan_wave(
+        _view_with_gap(), mode="broad", budget=None, shared_memory_snapshot_id="snap_1"
+    )
+    assert any(t.id.startswith("extract") for t in plan.tasks)
+    assert len(fake.recorded_requests) == 2, "gap 未覆盖应触发一次重试"
+    assert "gap" in fake.recorded_requests[1].messages[-1]["content"].lower()
+
+
+async def test_gap_coverage_twice_misses_raises() -> None:
+    """两次都不覆盖 gap 维度 → CurriculumGenerationError。"""
+    gen, _ = _generator(
+        [
+            InferResponse(text=_plan_with_ids("snap_1", ["export_doc_1"])),
+            InferResponse(text=_plan_with_ids("snap_1", ["export_doc_2"])),
+        ]
+    )
+    with pytest.raises(CurriculumGenerationError, match="gap"):
+        await gen.plan_wave(
+            _view_with_gap(), mode="broad", budget=None, shared_memory_snapshot_id="snap_1"
+        )

@@ -143,3 +143,77 @@ async def test_resource_limits_do_not_break_normal_skills(tmp_path) -> None:
     hog = "x = []\nwhile True:\n    x.append(b'A' * 1024 * 1024)\n"
     result2 = await sandbox.run(_artifact({"main.py": hog}), {}, timeout_s=3)
     assert result2.status == "failed"
+
+
+async def test_empty_contract_fails(tmp_path) -> None:
+    """M10：expected_outputs 与 failure_scenarios 皆空 → 不得 vacuous pass。"""
+    from agent_evolve.skill_sandbox import SkillArtifact, SkillSandbox
+
+    sandbox = SkillSandbox(tmp_path / "ws")
+    artifact = SkillArtifact(
+        skill_id="s_empty",
+        version="1",
+        entrypoint="main.py",
+        script_files={"main.py": "print('hi')"},
+        expected_outputs={},
+        known_failure_scenarios=[],
+    )
+    report = await sandbox.contract_test(artifact)
+    assert report.passed is False, "空契约必须 fail（无验收即无发布资格）"
+
+
+# ---------- T9（A#1）：沙箱网络隔离 ----------
+
+
+def _net_probe(port: int) -> SkillArtifact:
+    script = (
+        "import socket\n"
+        f"s = socket.create_connection(('127.0.0.1', {port}), timeout=3)\n"
+        "print('CONNECTED')\n"
+    )
+    return SkillArtifact(
+        skill_id="s_net_probe",
+        version="1",
+        entrypoint="probe.py",
+        script_files={"probe.py": script},
+    )
+
+
+async def test_network_deny_blocks_socket(tmp_path) -> None:
+    """network=deny（默认）：对 127.0.0.1 已监听端口的出站连接也被阻断（unix 实测）。"""
+    import socket as sockmod
+
+    server = sockmod.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        sandbox = SkillSandbox(tmp_path / "ws_deny")
+        result = await sandbox.run(_net_probe(port), {})
+        assert result.status == "failed", "deny 下连本机监听端口也应失败"
+    finally:
+        server.close()
+
+
+async def test_network_allow_permits(tmp_path) -> None:
+    """network=allow：同一探针可连通本机监听端口。"""
+    import socket as sockmod
+
+    server = sockmod.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        sandbox = SkillSandbox(tmp_path / "ws_allow", network="allow")
+        result = await sandbox.run(_net_probe(port), {})
+        assert result.status == "succeeded"
+        assert "CONNECTED" in result.stdout
+    finally:
+        server.close()
+
+
+async def test_unsupported_platform_raises(tmp_path, monkeypatch) -> None:
+    """平台不支持（如 win32）+ deny → 显式 ValueError，不静默跳过。"""
+    monkeypatch.setattr("sys.platform", "win32")
+    with pytest.raises(ValueError, match="网络隔离"):
+        SkillSandbox(tmp_path / "ws_x", network="deny")

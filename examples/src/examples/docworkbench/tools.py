@@ -13,24 +13,44 @@ HIDDEN_CONSTRAINTS: list[dict] = [
         "dimension": "export",
         "rule": "xlsx 导出对含图表扫描页的文档静默丢页；须先 convert_format(dpi=200)",
         "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 200},
     },
     {
         "id": "extract_two_column_region",
         "dimension": "extract",
         "rule": "双栏版式 extract_fields 必须显式传 region='left'，否则字段串栏",
         "naive_fails": True,
+        "claim": {"action": "extract_fields", "param": "region", "op": "==", "value": "left"},
     },
     {
         "id": "validate_tmp_prefix",
         "dimension": "validate",
         "rule": "invoice_no 以 TMP 开头时跳过校验和检查，恒为有效",
         "naive_fails": False,
+        "claim": {"action": "validate_form", "param": "skip_when_prefix",
+                  "op": "==", "value": "TMP"},
     },
     {
         "id": "convert_low_dpi_loses_fields",
         "dimension": "convert",
         "rule": "扫描件 convert_format(dpi<150) 会丢失低对比度字段",
         "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
+    },
+    {
+        "id": "export_non_xlsx_bypass",
+        "dimension": "export",
+        "rule": "图表丢页分支仅作用于 format==xlsx；显式非 xlsx 格式导出保留全部页",
+        "naive_fails": False,
+        "claim": {"action": "export_document", "param": "format", "op": "!=", "value": "xlsx"},
+    },
+    {
+        "id": "perception_low_contrast",
+        "dimension": "extract",
+        "rule": "低对比度页(contrast<0.5)读图前须 convert_format(dpi>=150) 提升对比度，"
+                "否则读图必错",
+        "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
     },
 ]
 
@@ -59,12 +79,36 @@ def extract_fields(doc: dict, region: str | None = None) -> dict:
     return {"fields": {f["name"]: f["value"] for f in doc["fields"]}, "contaminated": False}
 
 
+def extract_fields_from_image(doc: dict) -> dict:
+    """感知化抽取（T18）：只给图片引用与页对比度——字段值只在渲染 PNG 与真值表。"""
+    return {
+        "image_ref": doc["id"],
+        "pages": [
+            {"page": i, "contrast": float(p.get("contrast", 1.0))}
+            for i, p in enumerate(doc["pages"])
+        ],
+    }
+
+
+def submit_extracted_fields(doc_id: str, fields: dict) -> dict:
+    """交付抽取结果（T18）：模型读图后提交；交付载荷进证据链，由验收对照真值判分。"""
+    return {"doc_id": doc_id, "fields": dict(fields), "source": "image_read"}
+
+
 def convert_format(doc: dict, dpi: int = 200) -> dict:
-    """格式转换。隐藏约束：扫描件低 dpi 丢字段；高 dpi 为安全导出做准备。"""
+    """格式转换。隐藏约束：扫描件低 dpi 丢字段；高 dpi 为安全导出做准备。
+
+    T18：dpi>=150 时页对比度提升到 1.0（感知约束的可解除载体——convert 后读图全对）。
+    """
     if doc.get("kind") == "scan" and dpi < _REQUIRED_DPI:
         kept = [f for f in doc["fields"] if f.get("contrast", 1.0) >= 0.8]
         return {**doc, "fields": kept, "lossy": True, "dpi": dpi}
-    return {**doc, "lossy": False, "dpi": dpi, "export_ready": dpi >= _SAFE_EXPORT_DPI}
+    if dpi >= _REQUIRED_DPI:
+        pages = [{**p, "contrast": 1.0} for p in doc["pages"]]
+    else:
+        pages = doc["pages"]
+    return {**doc, "pages": pages, "lossy": False, "dpi": dpi,
+            "export_ready": dpi >= _SAFE_EXPORT_DPI}
 
 
 def export_document(doc: dict, format: str = "xlsx") -> dict:
