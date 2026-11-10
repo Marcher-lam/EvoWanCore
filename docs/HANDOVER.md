@@ -23,7 +23,7 @@ V1 已完整交付（master，已推 GitHub，主实验通过：探索臂 +16.7p
 
 - 本地：`/Users/marcher/Desktop/EvoWanCore`；远程：`git@github.com:Marcher-lam/EvoWanCore.git`（SSH 已通）
 - 当前分支：`feat/v2-implementation`（自 master `4e8c9f3` 分出）；master 干净
-- 测试基线：`uv run pytest` = **160 passed**（T4 的 RED 测试会使全量显示 161 中 1 failed——这是预期的进行时状态）
+- 测试基线：`uv run pytest` = **160 passed + 1 failed**（唯一失败 = T4 的 RED 测试 `test_wave_parallelism_enforced`，失败原因应为「并发峰值 4 超过 parallelism=2」——这是预期的进行时状态）
 - 质量门（每任务必须全过）：`uv run pytest` 全绿 + `uv run ruff check .` 无错（line-length 100，E501 不可自动修，提交前必须显式确认 ruff 干净）
 - 模型：`.env`（gitignored）配置 DeepSeek（`api.deepseek.com/v1`，`deepseek-flash`，支持 tool calling + json_object，**不支持 json_schema**——适配器已有自动降级链）
 - **key 曾在对话明文出现，用户已被告知建议轮换；不要把 key 写进任何被跟踪文件**
@@ -42,8 +42,8 @@ V1 已完整交付（master，已推 GitHub，主实验通过：探索臂 +16.7p
 ## 4. 精确接手点：T4（波次并发强制）进行中
 
 **已完成**：RED 测试 `test_wave_parallelism_enforced` 已写入
-`agent-explore/tests/test_exploration_controller.py`（文件末尾），**未提交**。
-该测试用 `PeakVerifier`（verify_task 内计数+sleep）观测波内并发峰值，断言 `peak["max"] <= 2`（计划波 parallelism=2、4 任务）。当前 1 failed（无并发约束 → 峰值=4）。
+`agent-explore/tests/test_exploration_controller.py`（文件末尾），**未提交**（工作树唯一未提交改动）。
+该测试用 `PeakVerifier`（verify_task 内计数+sleep）观测波内并发峰值，断言 `peak["max"] <= 2`（计划波 parallelism=2、4 任务）。已验证 RED 原因正确：「并发峰值 4 超过 parallelism=2」。
 
 **你要做的**：
 1. 跑 `uv run pytest agent-explore/tests/test_exploration_controller.py::test_wave_parallelism_enforced -x` 确认 RED（失败原因应为峰值 4 > 2）
