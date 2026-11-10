@@ -180,6 +180,7 @@ class DocumentAgentApp:
                 },
                 "applicability": {"app": "workbench", "env_version": ENV_VERSION},
                 "evidence_refs": outcome.evidence_refs,
+                "environment_version": ENV_VERSION,
             }
         ]
 
@@ -291,6 +292,7 @@ def build_app(
         verifier=verifier,
         memory_retriever=retriever,
         context_assembler=assembler,
+        environment_version=ENV_VERSION,
     )
 
     controller = ExplorationController(

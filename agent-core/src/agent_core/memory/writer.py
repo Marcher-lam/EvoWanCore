@@ -53,6 +53,7 @@ class DefaultMemoryWriter:
         applicability: dict,
         evidence_refs: list[str],
         source_refs: list[str] | None = None,
+        environment_version: str | None = None,
     ) -> MemoryRecord:
         epistemic = "observed" if evidence_refs else "hypothesized"
         return MemoryRecord(
@@ -63,6 +64,7 @@ class DefaultMemoryWriter:
             evidence_refs=evidence_refs,
             source_refs=source_refs or [],
             epistemic_status=epistemic,
+            environment_version=environment_version,
         )
 
     async def validate(self, record: MemoryRecord) -> ValidationReport:

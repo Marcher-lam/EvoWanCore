@@ -48,6 +48,7 @@ class AgentRuntime:
         memory_retriever=None,
         context_assembler=None,
         memory_token_budget: int = 400,
+        environment_version: str = "unspecified",
     ) -> None:
         self._gateway = gateway
         self._registry = registry
@@ -65,6 +66,7 @@ class AgentRuntime:
         self._memory_retriever = memory_retriever
         self._context_assembler = context_assembler
         self._memory_token_budget = memory_token_budget
+        self._environment_version = environment_version
 
     # ---------- 事件与状态助手 ----------
 
@@ -122,7 +124,7 @@ class AgentRuntime:
             records = await self._memory_retriever.retrieve(
                 scope={"namespaces": ["rules"]},
                 task_context={
-                    "environment_version": "workbench-1",
+                    "environment_version": self._environment_version,
                     "keywords": [task.kind.split(":")[-1], str(task.goal.get("what", ""))],
                 },
                 limit=8,
