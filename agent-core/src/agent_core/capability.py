@@ -63,7 +63,7 @@ class InMemoryCapabilityRegistry:
     def discover(self, query: dict) -> list[CapabilityDescriptor]:
         results = []
         for d in self._by_id.values():
-            if "type" in query and d.type is not query["type"]:
+            if "type" in query and d.type != query["type"]:
                 continue
             if "tags" in query and not set(query["tags"]) & set(d.tags):
                 continue

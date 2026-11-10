@@ -111,3 +111,10 @@ def test_unknown_capability_denied() -> None:
     engine = DefaultPolicyEngine()
     decision = engine.authorize(_action(), {})  # 无 capability 描述
     assert decision.allowed is False
+
+
+def test_discover_accepts_plain_string() -> None:
+    """M2: discover 用字符串查询也能命中（StrEnum 相等比较）。"""
+    reg = InMemoryCapabilityRegistry()
+    reg.register(_desc())
+    assert [d.id for d in reg.discover({"type": "tool"})] == ["tool_export"]
