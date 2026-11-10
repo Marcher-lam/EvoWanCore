@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 server = MCPServer(name="fs-fixture")
 
@@ -18,7 +19,7 @@ server = MCPServer(name="fs-fixture")
 def _resolve(root: Path, path: str) -> Path:
     candidate = (root / path).resolve()
     if not candidate.is_relative_to(root):
-        raise ValueError(f"路径逃逸（仅允许 root 内）: {path}")
+        raise ToolError(f"路径逃逸（仅允许 root 内）: {path}")
     return candidate
 
 
@@ -29,7 +30,7 @@ def make_server(root: str) -> MCPServer:
         """列出目录内条目（名字/类型，逗号分隔）。"""
         target = _resolve(root_path, path)
         if not target.is_dir():
-            raise ValueError(f"不是目录: {path}")
+            raise ToolError(f"不是目录: {path}")
         entries = sorted(
             f"{p.name}{'/' if p.is_dir() else ''}" for p in target.iterdir()
         )
@@ -39,7 +40,7 @@ def make_server(root: str) -> MCPServer:
         """读取文本文件内容。"""
         target = _resolve(root_path, path)
         if not target.is_file():
-            raise ValueError(f"不是文件: {path}")
+            raise ToolError(f"不是文件: {path}")
         return target.read_text(encoding="utf-8")
 
     server.add_tool(list_dir, name="list_dir", description="列出 root 内目录")

@@ -77,14 +77,15 @@ class MCPClientAdapter:
                 async def _call() -> dict:
                     session = await self._ensure_session()
                     result = await session.call_tool(_tool, dict(args))
-                    if getattr(result, "isError", False):
-                        texts = [
-                            getattr(c, "text", str(c)) for c in (result.content or [])
-                        ]
-                        raise RuntimeError(f"MCP 工具 {_tool} 报错: {'; '.join(texts)}")
-                    texts = [
-                        getattr(c, "text", "") for c in (result.content or [])
-                    ]
+                    is_error = bool(
+                        getattr(result, "is_error", None)
+                        or getattr(result, "isError", False)
+                    )
+                    texts = [getattr(c, "text", "") for c in (result.content or [])]
+                    if is_error:
+                        raise RuntimeError(
+                            f"MCP 工具 {_tool} 报错: {'; '.join(t for t in texts if t)}"
+                        )
                     return {"text": "\n".join(t for t in texts if t)}
 
                 return _call()
