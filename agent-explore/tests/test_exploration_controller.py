@@ -380,3 +380,29 @@ async def test_practice_goal_carries_doc_context_from_pool(tmp_path: Path) -> No
         m["content"] for r in env.fake.recorded_requests for m in r.messages
     )
     assert "doc_9" in all_content, "练习 goal 必须带 doc_id"
+
+
+async def test_wave_parallelism_enforced(tmp_path: Path) -> None:
+    """M9a: parallelism 生效——并发峰值 ≤ 限值，波内任务全部完成。"""
+    import asyncio
+
+    tasks = [_task_json("variant", f"任务{i}") for i in range(4)]
+    plan = _wave_plan_json("x", tasks)  # parallelism=2（默认构造为 4，见下）
+    peak = {"now": 0, "max": 0}
+
+    class PeakVerifier(StubVerifier):
+        async def verify_task(self, task, evidence_refs):
+            peak["now"] += 1
+            peak["max"] = max(peak["max"], peak["now"])
+            await asyncio.sleep(0.02)
+            peak["now"] -= 1
+            return await super().verify_task(task, evidence_refs)
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text=plan)] + [InferResponse(text="done")] * 4,
+        verifier=PeakVerifier(),
+    )
+    report = await env.run(mode="broad", max_waves=1)
+    assert report.tasks_executed == 4
+    assert peak["max"] <= 2, f"并发峰值 {peak['max']} 超过 parallelism=2"

@@ -149,7 +149,9 @@ class ExplorationController:
                 practice_pool=app_context.get("practice_pool"),
             )
 
-            outcomes = await self._run_wave(plan.tasks, verifier, app_context)
+            outcomes = await self._run_wave(
+                plan.tasks, verifier, app_context, parallelism=plan.wave.parallelism
+            )
             report.waves_executed += 1
             report.tasks_executed += len(outcomes)
             report.tasks_passed += sum(1 for o in outcomes if o.status == "passed")
@@ -192,21 +194,27 @@ class ExplorationController:
         return opened
 
     async def _run_wave(
-        self, tasks: list[PracticeTask], verifier: Verifier, app_context: dict
+        self,
+        tasks: list[PracticeTask],
+        verifier: Verifier,
+        app_context: dict,
+        parallelism: int = 4,
     ) -> list[PracticeOutcome]:
-        """并行执行；单任务异常收进 outcome（status=error），不杀姊妹任务。"""
+        """并行执行（Semaphore 限并发）；单任务异常收进 outcome（status=error），不杀姊妹任务。"""
+        gate = asyncio.Semaphore(max(1, parallelism))  # clamp 防 LLM 输出 0/负值死锁
 
         async def _one(task: PracticeTask) -> PracticeOutcome:
-            try:
-                return await self._run_practice(task, verifier, app_context)
-            except Exception as e:  # noqa: BLE001 — 波内隔离
-                return PracticeOutcome(
-                    task_id=task.id,
-                    title=task.title,
-                    family=task.family.value,
-                    status="error",
-                    error={"reason": f"{type(e).__name__}: {e}"},
-                )
+            async with gate:
+                try:
+                    return await self._run_practice(task, verifier, app_context)
+                except Exception as e:  # noqa: BLE001 — 波内隔离
+                    return PracticeOutcome(
+                        task_id=task.id,
+                        title=task.title,
+                        family=task.family.value,
+                        status="error",
+                        error={"reason": f"{type(e).__name__}: {e}"},
+                    )
 
         return list(await asyncio.gather(*(_one(t) for t in tasks)))
 
