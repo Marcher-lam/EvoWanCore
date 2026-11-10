@@ -34,7 +34,7 @@ class SimpleRetriever:
 
     def __init__(self, store: MemoryStore, include_candidates: bool = False) -> None:
         self._store = store
-        self._include_candidates = include_candidates
+        self.include_candidates = include_candidates  # 公有：app 的可见性开关（V2 §6.4）
 
     async def retrieve(self, scope: dict, task_context: dict, limit: int) -> list[MemoryRecord]:
         records: list[MemoryRecord] = []
@@ -46,7 +46,7 @@ class SimpleRetriever:
 
         # I3: 只有 ACTIVE 生命周期才可进入执行上下文（回滚/失效必须立刻生效）
         records = [r for r in records if r.lifecycle is LifecycleState.ACTIVE]
-        if not self._include_candidates:
+        if not self.include_candidates:
             records = [r for r in records if r.verification is not VerificationState.CANDIDATE]
 
         scored: list[tuple[float, int, MemoryRecord]] = []

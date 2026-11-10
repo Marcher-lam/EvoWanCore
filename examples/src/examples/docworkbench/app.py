@@ -96,6 +96,9 @@ class DocumentAgentApp:
         practice_part: CorpusPart | None,
         derived: dict[str, dict],
         model_counter=None,
+        event_log=None,
+        memory_retriever=None,
+        evo_db_path: Path | None = None,
     ) -> None:
         self._gateway = gateway
         self._runtime = runtime
@@ -108,12 +111,20 @@ class DocumentAgentApp:
         self._derived = derived
         self._practice_part = practice_part
         self._model_counter = model_counter
+        self._event_log = event_log
+        self._memory_retriever = memory_retriever
+        self._evo_db_path = evo_db_path
         self._agent = AgentSpec(id="doc_agent", role="document worker", model_id="m-app")
 
     @property
     def model_counter(self):
         """真实调用计数器（CountingAdapter）——实验两臂的统一预算口径（§6.2）。"""
         return self._model_counter
+
+    def set_memory_visibility(self, include_candidates: bool) -> None:
+        """V2 §6.4：切换候选记忆可见性（评测门 with/without 双臂 + 审计）。"""
+        if self._memory_retriever is not None:
+            self._memory_retriever.include_candidates = include_candidates
 
     @property
     def practice_task_ids(self) -> set[str]:
@@ -192,28 +203,117 @@ class DocumentAgentApp:
             }
         ]
 
+    def _gate_tasks(
+        self,
+        practice_ids: set[str],
+        heldout_ids: set[str],
+        *,
+        dimension: str,
+        exclude: bool = False,
+        limit: int = 3,
+    ) -> list[TaskSpec]:
+        """门评测任务选择 + 来源守卫（T12）：只出练习池；保留集 id 混入 → ValueError 红线。
+
+        exclude=False 选该维度任务（mini-batch，父子对比）；exclude=True 选其他维度
+        （回归场景，护旧能力）。
+        """
+        pool = [t for t in self._corpus.tasks if t["id"] in practice_ids]
+        if exclude:
+            selected = [t for t in pool if t["dimension"] != dimension][:limit]
+        else:
+            selected = [t for t in pool if t["dimension"] == dimension][:limit]
+        leaked = {t["id"] for t in selected} & set(heldout_ids)
+        if leaked:
+            raise ValueError(f"评测门吃到保留集任务（红线）: {sorted(leaked)}")
+        return [
+            TaskSpec(
+                id=t["id"],
+                kind=f"wb:{t['dimension']}",
+                goal={"what": t["goal"], "doc_id": t["doc_id"]},
+                input_schema={},
+                constraints={},
+                acceptance_criteria=[{"check": "workbench_programmatic"}],
+            )
+            for t in selected
+        ]
+
     async def _publish_candidates(self) -> None:
-        """发布门：陈述须与工作台真值一致（环境级验收），否则保持 CANDIDATE。"""
+        """V2 T12 通用评测门：EvolutionController 父子对比 + 回归通过才发布。
+
+        真值表（statement_matches_truth）退为审计标记，不再 gate（I1 教训泛化）。
+        DualRunner = 同 app solve：with_candidate ↔ 候选可见性切换（T11 默认排除）。
+        """
+        from agent_evolve.controller import (
+            EvolutionController,
+            ExperienceCandidate,
+            PublishDenied,
+        )
+
         from examples.docworkbench.audit import statement_matches_truth
 
         rules = await self._memory_store.query("rules", {})
-        for r in rules:
-            if r.verification.value != "candidate" or not r.evidence_refs:
-                continue
-            statement = str(r.content.get("statement", ""))
-            gate_ok = statement_matches_truth(statement)
-            try:
+        pending = [r for r in rules if r.verification.value == "candidate" and r.evidence_refs]
+        if not pending:
+            return
+
+        practice_ids = self.practice_task_ids
+        heldout_ids = {t["id"] for t in self._corpus.tasks} - practice_ids
+        evolution = EvolutionController(
+            memory_store=self._memory_store,
+            memory_publisher=self._publisher,
+            db_path=self._evo_db_path,
+            event_log=self._event_log,
+        )
+        try:
+            for r in pending:
+                dimension = r.source_refs[0].split("_", 1)[0] if r.source_refs else ""
+                mini_batch = self._gate_tasks(practice_ids, heldout_ids, dimension=dimension)
+                regression = self._gate_tasks(
+                    practice_ids, heldout_ids, dimension=dimension, exclude=True, limit=2
+                )
+
+                async def runner(task: TaskSpec, *, with_candidate: bool) -> float:
+                    self.set_memory_visibility(with_candidate)
+                    corpus_task = next(
+                        t for t in self._corpus.tasks if t["id"] == task.id
+                    )
+                    run = await self.solve(corpus_task)
+                    return 1.0 if run.state.value == "succeeded" else 0.0
+
+                cid = evolution.submit(
+                    ExperienceCandidate(
+                        candidate_type="memory",
+                        payload={
+                            "memory_id": r.id,
+                            "statement": str(r.content.get("statement", "")),
+                        },
+                        source_practice_ids=list(r.source_refs),
+                    )
+                )
+                report = await evolution.evaluate(
+                    cid, mini_batch, runner, regression_scenarios=regression
+                )
+                audit_ok = statement_matches_truth(str(r.content.get("statement", "")))
+                try:
+                    manifest = await evolution.publish(cid, report)
+                except PublishDenied:
+                    continue  # 未过门：保持 CANDIDATE，等待反例/复审
                 await self._publisher.publish(
                     r.id,
                     verifier_report={
-                        "source": "exploration",
-                        "app": "workbench",
-                        "passed": gate_ok,
-                        "checks": [{"check": "statement_matches_truth", "ok": gate_ok}],
+                        "source": "evolution_gate",
+                        "passed": True,
+                        "manifest": manifest.release_id,
+                        "audit_truth_match": audit_ok,  # 真值表退为审计标记
+                        "eval": {
+                            "mini": report.mini_batch_scores,
+                            "parent": report.parent_scores,
+                            "regression": report.regression_violations,
+                        },
                     },
                 )
-            except Exception:
-                pass  # 发布被拒：保持 CANDIDATE，等待反例/复审
+        finally:
+            self.set_memory_visibility(False)
 
 
 def _bind_tools(
@@ -340,4 +440,7 @@ def build_app(
         practice_part=practice_part,
         derived=derived,
         model_counter=model_counter,
+        event_log=event_log,
+        memory_retriever=retriever,
+        evo_db_path=Path(db_path).with_suffix(".evo.db"),
     )
