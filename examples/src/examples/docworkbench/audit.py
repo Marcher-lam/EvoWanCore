@@ -37,12 +37,22 @@ class AuditReport(BaseModel):
 
 
 def _op_ok(op: str, value: object, expected: object) -> bool:
-    if op == ">=":
-        return value >= expected
+    """算子判定（类型鲁棒）：LLM 声明的数值常为字符串——数值算子先做 float 容忍，
+    不可比即 False（不崩溃）。"""
     if op == "==":
-        return value == expected
+        if value == expected:
+            return True
+        try:
+            return float(value) == float(expected)  # noqa: TRY300
+        except (TypeError, ValueError):
+            return str(value) == str(expected)
     if op == "!=":
-        return value != expected
+        return not _op_ok("==", value, expected)
+    if op == ">=":
+        try:
+            return float(value) >= float(expected)
+        except (TypeError, ValueError):
+            return False
     return False
 
 

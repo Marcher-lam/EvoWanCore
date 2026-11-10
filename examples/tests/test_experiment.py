@@ -375,3 +375,19 @@ def test_audit_embedded_match_requires_dimension_relevance() -> None:
                   "params": {"format": "pdf", "preceded_by_convert_dpi": 200}},
     }
     assert statement_matches_truth(legit) is True
+
+
+def test_audit_tolerates_string_numbers() -> None:
+    """T31-C 收尾：LLM 声明的数值常为字符串（"200"）——审计须容忍且不错杀不崩溃。"""
+    from examples.docworkbench.audit import statement_matches_truth
+
+    ok = {
+        "claim": {"dimension": "convert", "action": "convert_format",
+                  "params": {"dpi": "200"}},
+    }
+    assert statement_matches_truth(ok) is True, '"200" 应按数值判定（>=150）'
+    bad = {
+        "claim": {"dimension": "convert", "action": "convert_format",
+                  "params": {"dpi": "abc"}},
+    }
+    assert statement_matches_truth(bad) is False, "非数值不得崩溃，判不过"
