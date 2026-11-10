@@ -105,6 +105,10 @@ class AgentRuntime:
             for d in self._registry.discover({})
         ]
 
+    def events(self, run_id: str):
+        """M8：公有事件流（外部消费免触 _log）。"""
+        return self._log.iter_events(run_id)
+
     # ---------- 提交与主循环 ----------
 
     async def _assemble_memory(self, task: TaskSpec) -> str:

@@ -262,7 +262,7 @@ class ExplorationController:
         run = await runtime.submit(spec, agent)
         evidence_refs = [
             e.payload.get("evidence_refs", [])
-            async for e in runtime._log.iter_events(run.id)
+            async for e in runtime.events(run.id)
             if e.type == "ActionSucceeded"
         ]
         flat = [ref for group in evidence_refs for ref in group]

@@ -250,7 +250,7 @@ def _bind_tools(
     tool("export_document", wb.export_document, side_effect="write")
     tool("validate_form", wb.validate_form)
 
-    # convert 产生派生文档，供 export/extract 消费
+    # convert 产生派生文档，供 export/extract 消费——M8：公有 rebind 覆盖绑定
     original_convert = wb.convert_format
 
     async def convert_handler(args):
@@ -260,7 +260,19 @@ def _bind_tools(
         return {"lossy": converted.get("lossy", False), "dpi": converted.get("dpi"),
                 "export_ready": converted.get("export_ready", False), "doc_id": args["doc_id"]}
 
-    registry._bindings["convert_format"] = convert_handler  # noqa: SLF001
+    registry.rebind(
+        CapabilityDescriptor(
+            id="convert_format",
+            type=CapabilityType.TOOL,
+            name="convert_format",
+            input_schema={"doc_id": "str"},
+            output_schema={},
+            side_effect_level="write",
+            auth_scope=[],
+            tags=["workbench"],
+        ),
+        convert_handler,
+    )
 
 
 def build_app(
@@ -270,6 +282,7 @@ def build_app(
     blob_dir: Path | str,
     corpus: Corpus,
     practice_part: CorpusPart | None = None,
+    verifier=None,
 ) -> DocumentAgentApp:
     from agent_core.models import CountingAdapter, ModelGateway
 
@@ -288,7 +301,7 @@ def build_app(
     memory_store = SqliteMemoryStore(Path(db_path).with_suffix(".mem.db"))
     gap_ledger = SqliteGapLedger(Path(db_path).with_suffix(".gaps.db"))
 
-    verifier = WorkbenchVerifier(corpus, evidence)
+    runtime_verifier = verifier if verifier is not None else WorkbenchVerifier(corpus, evidence)
     retriever = SimpleRetriever(memory_store)
     assembler = TokenBudgetAssembler()
 
@@ -299,7 +312,7 @@ def build_app(
         event_log=event_log,
         state_store=state_store,
         evidence_store=evidence,
-        verifier=verifier,
+        verifier=runtime_verifier,
         memory_retriever=retriever,
         context_assembler=assembler,
         environment_version=ENV_VERSION,
