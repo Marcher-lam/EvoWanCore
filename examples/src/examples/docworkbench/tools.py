@@ -37,6 +37,14 @@ HIDDEN_CONSTRAINTS: list[dict] = [
         "naive_fails": True,
         "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
     },
+    {
+        "id": "perception_low_contrast",
+        "dimension": "extract",
+        "rule": "低对比度页(contrast<0.5)读图前须 convert_format(dpi>=150) 提升对比度，"
+                "否则读图必错",
+        "naive_fails": True,
+        "claim": {"action": "convert_format", "param": "dpi", "op": ">=", "value": 150},
+    },
 ]
 
 _REQUIRED_DPI = 150

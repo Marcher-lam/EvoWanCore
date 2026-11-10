@@ -185,3 +185,16 @@ def test_acceptance_judges_submitted_fields() -> None:
     assert any(p.get("contrast", 1.0) < 1.0 for p in low["pages"]) or low["lossy"], (
         "低 dpi 不提升对比度（且扫描件丢字段）"
     )
+
+
+def test_perception_constraint_registered() -> None:
+    """T20：第四隐藏约束（低对比度感知陷阱）进入真值表，claim 键机器可判。"""
+    entry = next(
+        (c for c in HIDDEN_CONSTRAINTS if c["id"] == "perception_low_contrast"), None
+    )
+    assert entry, "真值表须含 perception_low_contrast"
+    assert entry["dimension"] == "extract"
+    assert entry["claim"] == {
+        "action": "convert_format", "param": "dpi", "op": ">=", "value": 150,
+    }, "claim 键须与 convert 提升对比度的实际机制一致"
+    assert all(c.get("claim") for c in HIDDEN_CONSTRAINTS), "既有约束均须带 claim 键"

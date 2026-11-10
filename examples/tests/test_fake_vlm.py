@@ -1,7 +1,6 @@
 """T19 WorkbenchFakeVLM：对比度条件读图（第四隐藏约束的可测载体，Review Focus #3）。"""
 
 from agent_core.models import InferRequest
-
 from examples.docworkbench.corpus import Corpus
 from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
 from examples.docworkbench.generator import generate_corpus
