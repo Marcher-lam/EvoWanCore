@@ -469,6 +469,7 @@ def build_app(
     blob_dir: Path | str,
     corpus: Corpus,
     practice_part: CorpusPart | None = None,
+    heldout_part: CorpusPart | None = None,
     verifier=None,
     reflector=None,
     vlm_adapter=None,
@@ -484,6 +485,14 @@ def build_app(
     vlm = vlm_adapter or (vlm_factory(corpus, derived) if vlm_factory else None)
     if vlm is not None:
         gateway.register(vlm)  # T21：视觉任务按能力路由命中（inputs 含 IMAGE）
+
+    # I3：切分缺陷绊线——练习池混入保留集任务在组装期即炸（红线独立断言）
+    if practice_part is not None and heldout_part is not None:
+        overlap = {t["id"] for t in practice_part.tasks} & {
+            t["id"] for t in heldout_part.tasks
+        }
+        if overlap:
+            raise ValueError(f"保留集任务混入练习池（红线）: {sorted(overlap)}")
 
     registry = InMemoryCapabilityRegistry()
     _bind_tools(registry, corpus, derived)

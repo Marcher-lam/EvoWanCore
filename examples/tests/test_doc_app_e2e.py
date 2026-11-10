@@ -419,3 +419,30 @@ async def test_solve_starts_from_pristine_doc(tmp_path: Path) -> None:
     assert run.state.value == "failed", (
         "solve 必须从原始文档开始——共享 derived 会让 parent 臂（及重试臂）白读真值"
     )
+
+
+async def test_build_app_rejects_practice_heldout_overlap(tmp_path: Path, corpus) -> None:
+    """I3（终评审）：切分缺陷（练习池混入保留集任务）在组装期即炸——
+    门的来源守卫从结构性死代码升级为独立断言。"""
+    import copy
+
+    from agent_core.models import FakeModelAdapter, Modality, ModelCapabilities
+    from examples.docworkbench.corpus import CorpusPart
+
+    practice, _ = split_corpus(corpus, practice_ratio=0.5)
+    leaked = CorpusPart(  # 模拟 split_corpus 缺陷：保留集任务混进练习部分
+        tasks=[copy.deepcopy(corpus.tasks[-1])],
+        ground_truth={},
+        documents=corpus.documents,
+    )
+    poisoned_part = CorpusPart(
+        tasks=practice.tasks + leaked.tasks,
+        ground_truth=practice.ground_truth,
+        documents=practice.documents,
+    )
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    with pytest.raises(ValueError, match="保留集"):
+        build_app(
+            model_adapter=fake, db_path=tmp_path / "x.db", blob_dir=tmp_path / "xb",
+            corpus=corpus, practice_part=poisoned_part, heldout_part=leaked,
+        )

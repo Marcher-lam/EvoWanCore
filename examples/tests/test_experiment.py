@@ -310,3 +310,68 @@ def test_audit_accepts_true_alternative_strategies() -> None:
         "statement": "xlsx direct export keeps all pages",
     }
     assert statement_matches_truth(wrong) is False
+
+
+async def test_comparable_uses_call_count_when_w_in_calls(tmp_path: Path) -> None:
+    """C1（终评审）：W 以真实调用计数计量时，comparable=两臂都打满同一 W（§6.2）。"""
+    from agent_explore.curriculum import ExplorationBudget
+
+    def corpus_factory(seed: int):
+        return generate_corpus(seed=seed, size=8, difficulty=0.3)
+
+    def adapter_factory(seed: int):
+        corpus = corpus_factory(seed)
+        practice, _heldout = split_corpus(corpus, 0.5)
+        task_id = (practice.tasks or corpus.tasks)[0]["id"]
+        return ForeverAdapter(InferResponse(text="give up"), plan_task_id=task_id)
+
+    cfg = ExperimentConfig(
+        seeds=[11],
+        budget_w=ExplorationBudget(max_tokens=4, max_actions=12),  # W=4 次调用
+        practice_ratio=0.5,
+        corpus_factory=corpus_factory,
+        adapter_factory=adapter_factory,
+        workdir=tmp_path,
+        max_waves=8,
+    )
+    report = await run_experiment(cfg)
+    # 重试臂每次 solve 恰 1 次调用 → 4 次；探索臂每波 plan+practice 2 次 → 2 波=4 次
+    assert report.arms["retry"].budget_spent["tokens"] >= 4
+    assert report.arms["explore"].budget_spent["tokens"] >= 4
+    assert report.comparable is True, "两臂打满同一调用预算 → comparable"
+
+    cfg_capped = ExperimentConfig(
+        seeds=[11],
+        budget_w=ExplorationBudget(max_tokens=6, max_actions=12),
+        practice_ratio=0.5,
+        corpus_factory=corpus_factory,
+        adapter_factory=adapter_factory,
+        workdir=tmp_path / "capped",
+        max_waves=1,  # 探索臂波次上限先于预算耗尽 → 未打满
+    )
+    capped = await run_experiment(cfg_capped)
+    assert capped.comparable is False, "探索臂未打满调用预算（波次上限截断）→ 不可比"
+
+
+def test_audit_embedded_match_requires_dimension_relevance() -> None:
+    """I1（终评审）：嵌入参数匹配须与约束维度相关——跨维度巧合串名不算真策略。"""
+    from examples.docworkbench.audit import statement_matches_truth
+
+    # 对抗样例 1：validate 动作的 format 参数碰瓷 export 约束的 format 键 → 拒
+    sneaky_format = {
+        "claim": {"dimension": "validate", "action": "validate_form",
+                  "params": {"output_format": "json"}},
+    }
+    assert statement_matches_truth(sneaky_format) is False
+    # 对抗样例 2：parse 动作的 render_dpi 碰瓷 dpi 阈值 → 拒
+    sneaky_dpi = {
+        "claim": {"dimension": "extract", "action": "parse_document",
+                  "params": {"render_dpi": 999}},
+    }
+    assert statement_matches_truth(sneaky_dpi) is False
+    # 合法管线式（export 维度 + 嵌入 dpi）仍接受
+    legit = {
+        "claim": {"dimension": "export", "action": "export_document",
+                  "params": {"format": "pdf", "preceded_by_convert_dpi": 200}},
+    }
+    assert statement_matches_truth(legit) is True

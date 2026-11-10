@@ -54,6 +54,7 @@ def _claim_satisfies(claim: dict) -> bool:
     只要参数名含约束参数名且值满足算子即认可（真策略）。
     """
     action = claim.get("action")
+    dimension = claim.get("dimension")
     params = claim.get("params") or {}
     for constraint in HIDDEN_CONSTRAINTS:
         spec = constraint.get("claim")
@@ -64,9 +65,14 @@ def _claim_satisfies(claim: dict) -> bool:
             if _op_ok(op, params[param], expected):
                 return True
             continue
-        # 嵌入参数：参数名携带约束参数语义（如 *_dpi），跨动作认可真策略
+        # 嵌入参数（I1 收紧）：仅当 (a) 维度与约束一致，且 (b) 参数名同时引用
+        # 约束动作与参数（管线出处可证，如 preceded_by_convert_dpi）才认可——
+        # 跨维度巧合串名（output_format/render_dpi 碰瓷）不算真策略
+        action_token = str(spec["action"]).split("_")[0]
+        if dimension != constraint.get("dimension"):
+            continue
         for name, value in params.items():
-            if param in name and _op_ok(op, value, expected):
+            if param in name and action_token in name and _op_ok(op, value, expected):
                 return True
     return False
 

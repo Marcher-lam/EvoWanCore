@@ -16,13 +16,16 @@ from agent_core.models import InferRequest, InferResponse, Modality, ModelCapabi
 
 _DOC_ID = re.compile(r"doc_\d+")
 
-_RULE_MARKERS = ("convert_format", "对比度", "contrast")
+_RULE_CLAIM_MARKER = "claim:convert_format"
 
 
 def _rule_seen(blob: str) -> bool:
-    """上下文是否携带"convert 提升对比度"类已发布规则。"""
-    low = blob.lower()
-    return any(m in low for m in _RULE_MARKERS)
+    """上下文是否携带 convert_format 声明的已发布规则（I2 归因隔离）。
+
+    按 claim 动作判定（渲染行含 claim:convert_format 标记），而非文本提及——
+    export 声明的规则即使文本提及 convert 也不得驱动读图转换。
+    """
+    return _RULE_CLAIM_MARKER in blob.lower()
 
 
 def _perturb(doc_id: str, name: str, value: object) -> object:

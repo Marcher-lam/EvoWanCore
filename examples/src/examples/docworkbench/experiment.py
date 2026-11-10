@@ -213,6 +213,7 @@ async def _retry_arm(
         blob_dir=workdir / "blobs",
         corpus=corpus,
         practice_part=practice,
+        heldout_part=heldout,
         vlm_factory=_vlm_factory(config),
     )
     meter = BudgetMeter(config.budget_w)
@@ -262,5 +263,17 @@ async def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         name: _arm_stats(name, pairs, spent[name], attempts[name])
         for name, pairs in all_pairs.items()
     }
-    comparable = spent["explore"].get("actions", 0) == spent["retry"].get("actions", 0)
+    # C1（§6.2）：W 以真实调用计数计量（max_tokens=每种子调用预算）时，
+    # comparable = 两臂都打满同一 W；否则回退 V1 动作等量口径
+    w_calls = config.budget_w.max_tokens
+    if w_calls is not None:
+        need = w_calls * len(config.seeds)
+        comparable = (
+            spent["explore"].get("tokens", 0) >= need
+            and spent["retry"].get("tokens", 0) >= need
+        )
+    else:
+        comparable = (
+            spent["explore"].get("actions", 0) == spent["retry"].get("actions", 0)
+        )
     return ExperimentReport(seeds=config.seeds, arms=arms, comparable=comparable)

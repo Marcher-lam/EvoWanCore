@@ -55,3 +55,18 @@ async def test_call_tool_roundtrip(fs_root: Path) -> None:
         assert nested["text"] == "nested"
     finally:
         await adapter.close()
+
+
+async def test_lazy_connect_is_race_safe(fs_root: Path) -> None:
+    """I4（终评审）：并发首调只起一个 server 子进程（锁保护 lazy connect）。"""
+    import asyncio
+
+    adapter = MCPClientAdapter(_server_cmd(fs_root))
+    try:
+        results = await asyncio.gather(
+            adapter.import_capabilities(), adapter.import_capabilities()
+        )
+        assert all(len(caps) == 2 for caps in results), "两个并发首调都应成功"
+        assert adapter._owner is not None  # noqa: SLF001 — 单一 owner task（无孤儿进程）
+    finally:
+        await adapter.close()

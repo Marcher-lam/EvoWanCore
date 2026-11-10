@@ -73,7 +73,9 @@ class TokenBudgetAssembler:
     @staticmethod
     def _render(record: MemoryRecord) -> str:
         statement = record.content.get("statement", str(record.content))
-        return f"- [{record.kind.value}|{record.verification.value}] {statement}"
+        claim_action = (record.content.get("claim") or {}).get("action")
+        claim_tag = f"|claim:{claim_action}" if claim_action else ""
+        return f"- [{record.kind.value}|{record.verification.value}{claim_tag}] {statement}"
 
     def assemble(self, records: list[MemoryRecord], token_budget: int) -> str:
         lines: list[str] = []

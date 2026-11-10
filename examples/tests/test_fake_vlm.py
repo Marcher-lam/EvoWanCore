@@ -113,8 +113,9 @@ async def test_fake_vlm_with_rule_converts_first() -> None:
         model_id="fake-vlm",
         messages=[
             {"role": "system", "content": (
-                "Relevant memory:\n- [rule|verified] 低对比度页(contrast<0.5)读图前须 "
-                "convert_format(dpi>=150) 提升对比度，否则读图必错")},
+                "Relevant memory:\n- [rule|verified|claim:convert_format] "
+                "低对比度页(contrast<0.5)读图前须 convert_format(dpi>=150) "
+                "提升对比度，否则读图必错")},
             {"role": "user", "content": f"image_ref={doc['id']} 读图抽取"},
         ],
     )
@@ -123,3 +124,41 @@ async def test_fake_vlm_with_rule_converts_first() -> None:
         "有规则时低对比度文档应先转换（而非直接提交错值）"
     )
     assert resp.tool_calls[0]["arguments"]["dpi"] >= 150
+
+
+async def test_fake_vlm_rule_detection_scoped_to_claim_action() -> None:
+    """I2（终评审）：规则触发按 claim 动作判定——export 声明的规则文本提及
+    convert_format 不得触发读图转换（归因隔离）；convert_format 声明才触发。"""
+    from agent_core.models import InferRequest
+
+    corpus = _corpus()
+    doc = next(
+        d
+        for d in corpus.documents
+        if any(p.get("contrast", 1.0) < 0.5 for p in d["pages"])
+    )
+    vlm = WorkbenchFakeVLM(corpus, derived={})
+
+    def _req(memory_line: str) -> InferRequest:
+        return InferRequest(
+            model_id="fake-vlm",
+            messages=[
+                {"role": "system", "content": f"Relevant memory:\n{memory_line}"},
+                {"role": "user", "content": f"image_ref={doc['id']} 读图抽取"},
+            ],
+        )
+
+    # export 声明的规则（文本提及 convert_format）——不触发
+    export_rule = (
+        "- [rule|verified|claim:export_document] 须先 convert_format(dpi=200) 再导出"
+    )
+    resp = await vlm.infer(_req(export_rule))
+    assert resp.tool_calls[0]["name"] == "submit_extracted_fields", (
+        "export 声明的规则不得驱动读图转换（归因隔离）"
+    )
+    # convert_format 声明的规则——触发
+    convert_rule = (
+        "- [rule|verified|claim:convert_format] 低对比度页须先转换提升对比度"
+    )
+    resp2 = await vlm.infer(_req(convert_rule))
+    assert resp2.tool_calls[0]["name"] == "convert_format"
