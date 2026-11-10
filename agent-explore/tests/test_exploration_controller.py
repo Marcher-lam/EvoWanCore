@@ -101,6 +101,7 @@ class Env:
         self.agent = AgentSpec(id="agent_x", role="worker", model_id="m-x")
         self.log: list[str] = []
         self.reflector = reflector or (lambda task, outcome: [])
+        self.extra_context: dict = {}
         self.controller = ExplorationController(
             curriculum=LLMCurriculumGenerator(gateway=self.gateway, model_id="m-x"),
             assembler=DefaultAssembler(),
@@ -116,6 +117,7 @@ class Env:
             "agent": self.agent,
             "reflector": self.reflector,
             "environment_version": "1.0",
+            **self.extra_context,
         }
 
     async def run(self, mode: str = "broad", *, max_waves: int = 2, max_deep: int = 3):
@@ -359,3 +361,22 @@ async def test_failed_practice_opens_gap(tmp_path: Path) -> None:
     assert len(gaps) == 1
     assert gaps[0].gap_type is GapType.KNOWLEDGE
     assert "会失败的任务" in gaps[0].title
+
+
+async def test_practice_goal_carries_doc_context_from_pool(tmp_path: Path) -> None:
+    """练习任务的 goal 必须携带池内任务的 doc_id（模型据此选文档）。"""
+    plan = _wave_plan_json("x", [_task_json("variant", "抽取练习")])
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(text=plan), InferResponse(text="ok")],
+        reflector=lambda task, outcome: [],
+    )
+    env.extra_context["practice_pool"] = [
+        {"id": "抽取练习", "dimension": "extract", "doc_id": "doc_9", "goal": "抽取字段"}
+    ]
+    await env.run(mode="broad", max_waves=1)
+    # 练习提交的模型请求应包含 doc_id
+    all_content = " ".join(
+        m["content"] for r in env.fake.recorded_requests for m in r.messages
+    )
+    assert "doc_9" in all_content, "练习 goal 必须带 doc_id"

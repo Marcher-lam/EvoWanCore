@@ -163,3 +163,36 @@ async def test_audit_clean_when_all_true(tmp_path: Path) -> None:
     corpus = generate_corpus(seed=3, size=4, difficulty=0.3)
     report = await audit_promoted(store, corpus)
     assert report.error_promotion_rate == 0.0
+
+
+async def test_default_factory_uses_env_provider(tmp_path: Path, monkeypatch) -> None:
+    """环境配置了供应商 → 默认工厂产出真实 OpenAI 兼容适配器。"""
+    import agent_adapters.openai_compat as oc
+    from examples.docworkbench.experiment import _default_adapter_factory
+
+    built: list[dict] = []
+
+    class FakeReal:
+        def __init__(self, **kw):
+            built.append(kw)
+            self.caps = kw["capabilities"]
+
+        def capabilities(self):
+            return self.caps
+
+    monkeypatch.setenv("EWC_BASE_URL", "https://api.deepseek.test/v1")
+    monkeypatch.setenv("EWC_API_KEY", "sk-env")
+    monkeypatch.setenv("EWC_MODEL_CHAT", "ds-flash")
+    orig = oc.OpenAICompatAdapter
+    oc.OpenAICompatAdapter = FakeReal  # type: ignore[assignment]
+    try:
+        factory = _default_adapter_factory(
+            lambda seed: generate_corpus(seed=1, size=4, difficulty=0.3), 0.5
+        )
+        adapter = factory(7)
+        assert adapter is not None
+        assert built[0]["base_url"] == "https://api.deepseek.test/v1"
+        assert built[0]["api_key"] == "sk-env"
+        assert built[0]["capabilities"].model_id == "ds-flash"
+    finally:
+        oc.OpenAICompatAdapter = orig  # type: ignore[assignment]

@@ -102,3 +102,52 @@ def test_capabilities_passthrough() -> None:
         base_url="https://api.fake.test/v1", api_key="sk-x", capabilities=caps
     )
     assert adapter.capabilities() is caps
+
+
+def _schema_request() -> InferRequest:
+    return InferRequest(
+        model_id="glm-x",
+        messages=[{"role": "user", "content": "出题"}],
+        structured_output={"name": "P", "schema": {"type": "object"}},
+    )
+
+
+async def test_structured_output_falls_back_to_json_object() -> None:
+    """DeepSeek 等不支持 json_schema 时：降级 json_object + schema 进提示。"""
+    import httpx
+    import openai
+
+    calls: list[dict] = []
+
+    def make_client():
+        async def create(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("response_format", {}).get("type") == "json_schema":
+                resp = httpx.Response(400, request=httpx.Request("POST", "https://x"))
+                raise openai.BadRequestError(
+                    "This response_format type is unavailable now", response=resp, body=None
+                )
+            return _response(content='{"p": 1}')
+
+        return NS(chat=NS(completions=NS(create=create)))
+
+    import agent_adapters.openai_compat as oc
+
+    orig = oc.AsyncOpenAI
+    oc.AsyncOpenAI = lambda **kw: make_client()  # type: ignore[assignment]
+    try:
+        adapter = oc.OpenAICompatAdapter(
+            base_url="https://api.fake.test/v1", api_key="sk-x", capabilities=_caps()
+        )
+        resp = await adapter.infer(_schema_request())
+        assert resp.text == '{"p": 1}'
+        assert len(calls) == 2
+        assert calls[1]["response_format"] == {"type": "json_object"}
+        assert "json_schema" in str(calls[1]["messages"][-1]["content"]).lower() or "schema" in str(
+            calls[1]["messages"][-1]["content"]
+        ).lower()
+        # 模式缓存：后续调用直接走 json_object，不再先撞 400
+        await adapter.infer(_schema_request())
+        assert len(calls) == 3
+    finally:
+        oc.AsyncOpenAI = orig  # type: ignore[assignment]

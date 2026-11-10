@@ -77,9 +77,10 @@ class ModelLoopPolicy:
                     ),
                 }
             )
-        resp = await self._gateway.route({"inputs": [Modality.TEXT]}).infer(
+        adapter = self._gateway.route({"inputs": [Modality.TEXT]})
+        resp = await adapter.infer(
             InferRequest(
-                model_id=self._agent.model_id,
+                model_id=adapter.capabilities().model_id,
                 messages=messages,
                 tools=context.get("capability_schemas") or None,
             )

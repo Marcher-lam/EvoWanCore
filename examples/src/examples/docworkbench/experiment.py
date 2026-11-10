@@ -92,6 +92,31 @@ class _DefaultAdapter:
 
 
 def _default_adapter_factory(corpus_factory, practice_ratio: float):
+    """环境配置了供应商 → 真适配器；否则退化为脚本占位（统计结构自检用）。"""
+    import os
+
+    base_url = os.environ.get("EWC_BASE_URL")
+    api_key = os.environ.get("EWC_API_KEY")
+    model_id = os.environ.get("EWC_MODEL_CHAT")
+
+    if base_url and api_key and model_id:
+        from agent_adapters.openai_compat import OpenAICompatAdapter
+        from agent_core.models import Modality, ModelCapabilities
+
+        def real_factory(seed: int) -> ModelAdapter:
+            return OpenAICompatAdapter(
+                base_url=base_url,
+                api_key=api_key,
+                capabilities=ModelCapabilities(
+                    model_id=model_id,
+                    inputs={Modality.TEXT},
+                    interaction={"batch", "streaming"},
+                    tools={"native_tool_call"},
+                ),
+            )
+
+        return real_factory
+
     def factory(seed: int) -> ModelAdapter:
         corpus = corpus_factory(seed)
         tasks = corpus.tasks

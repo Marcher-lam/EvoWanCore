@@ -213,10 +213,20 @@ class ExplorationController:
     async def _run_practice(
         self, task: PracticeTask, verifier: Verifier, app_context: dict
     ) -> PracticeOutcome:
+        # 练习池上下文确定性合并：doc_id 等关键信息来自池（不信 LLM 回显）
+        pool_entry = next(
+            (p for p in app_context.get("practice_pool", []) if p.get("id") == task.id), {}
+        )
+        goal = {
+            "what": task.title,
+            "dimension": pool_entry.get("dimension"),
+            "doc_id": pool_entry.get("doc_id"),
+            **{k: v for k, v in task.objective.items() if k != "what"},
+        }
         spec = TaskSpec(
             id=task.id,
             kind=f"practice:{task.family.value}",
-            goal={"what": task.title, **task.objective},
+            goal=goal,
             input_schema={},
             constraints=task.constraints,
             acceptance_criteria=task.acceptance.pass_conditions or [{"check": "practice_done"}],
