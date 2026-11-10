@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from agent_core.capability import CapabilityDescriptor, CapabilityType, InMemoryCapabilityRegistry
@@ -144,12 +145,20 @@ class DocumentAgentApp:
         return {t["id"] for t in self._practice_part.tasks}
 
     async def solve(self, corpus_task: dict) -> RunHandle:
+        # T21：感知任务（image_required）→ vision 约束 + 渲染 PNG 作 data URL
+        constraints: dict = {}
+        if corpus_task.get("image_required"):
+            png = self._corpus.assets.get(corpus_task["doc_id"], b"")
+            constraints = {
+                "vision": True,
+                "image_url": f"data:image/png;base64,{base64.b64encode(png).decode()}",
+            }
         spec = TaskSpec(
             id=corpus_task["id"],
             kind=f"wb:{corpus_task['dimension']}",
             goal={"what": corpus_task["goal"], "doc_id": corpus_task["doc_id"]},
             input_schema={},
-            constraints={},
+            constraints=constraints,
             acceptance_criteria=[{"check": "workbench_programmatic"}],
         )
         return await self._runtime.submit(spec, self._agent)
@@ -416,6 +425,7 @@ def build_app(
     practice_part: CorpusPart | None = None,
     verifier=None,
     reflector=None,
+    vlm_adapter=None,
 ) -> DocumentAgentApp:
     from agent_core.models import CountingAdapter, ModelGateway
 
@@ -423,6 +433,8 @@ def build_app(
     model_counter = CountingAdapter(model_adapter)
     gateway = ModelGateway()
     gateway.register(model_counter)
+    if vlm_adapter is not None:
+        gateway.register(vlm_adapter)  # T21：视觉任务按能力路由命中（inputs 含 IMAGE）
 
     registry = InMemoryCapabilityRegistry()
     derived: dict[str, dict] = {}

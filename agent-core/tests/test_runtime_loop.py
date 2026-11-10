@@ -487,3 +487,66 @@ async def test_resume_continues_remaining_steps(tmp_path: Path) -> None:
     assert len(dispatched) == 2, "两动作各只派发一次（崩溃不重发，恢复续跑第二动作）"
     assert len(succeeded) == 2
     assert not any(e.type == "ActionOutcomeUnknown" for e in events)  # 崩溃时无在途动作
+
+
+# ---------- T21：多模态消息构造 + VLM 路由 ----------
+
+
+async def test_vision_task_routes_to_vlm() -> None:
+    """vision 约束任务：消息含 image content part，且路由命中 VLM（文本适配器不接）。"""
+    from agent_core.run import RunHandle
+
+    text_fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-text", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+        [InferResponse(text="text agent")],
+    )
+    vlm_fake = FakeModelAdapter(
+        ModelCapabilities(
+            model_id="m-vlm", inputs={Modality.TEXT, Modality.IMAGE}, tools={"native_tool_call"}
+        ),
+        [InferResponse(text="vlm read")],
+    )
+    gw = ModelGateway()
+    gw.register(text_fake)
+    gw.register(vlm_fake)
+    policy = ModelLoopPolicy(
+        gateway=gw, agent=AgentSpec(id="a_v", role="worker", model_id="m-text")
+    )
+    vision_spec = TaskSpec(
+        id="spec_vision",
+        kind="wb:extract-image",
+        goal={"what": "读图抽取"},
+        input_schema={},
+        constraints={"vision": True, "image_url": "data:image/png;base64,QUJD"},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    run = RunHandle(task_id="task_spec_vision", agent_id="a_v")
+    context: dict = {
+        "task": vision_spec,
+        "capability_schemas": [],
+        "history": [],
+        "memory": "",
+        "pending": [],
+    }
+
+    await policy.propose_next_actions(run, context)
+    assert len(vlm_fake.recorded_requests) == 1, "视觉任务必须路由到 VLM"
+    assert len(text_fake.recorded_requests) == 0, "文本适配器不应接到视觉任务"
+    import json as _json
+
+    blob = _json.dumps([m for m in vlm_fake.recorded_requests[0].messages])
+    assert "image_url" in blob and "data:image/png;base64,QUJD" in blob, (
+        "消息必须携带 image content part（data URL）"
+    )
+
+    plain_spec = TaskSpec(
+        id="spec_plain",
+        kind="wb:export",
+        goal={"what": "导出"},
+        input_schema={},
+        constraints={},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    await policy.propose_next_actions(run, {**context, "task": plain_spec})
+    assert len(text_fake.recorded_requests) == 1, "非视觉任务仍走文本适配器"
+    assert len(vlm_fake.recorded_requests) == 1

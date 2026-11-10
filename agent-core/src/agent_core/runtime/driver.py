@@ -66,6 +66,22 @@ class ModelLoopPolicy:
         memory = context.get("memory")
         if memory:
             messages.append({"role": "system", "content": f"Relevant memory:\n{memory}"})
+        # T21：视觉约束任务 → 多模态消息（image content part）+ 按能力路由 VLM
+        constraints = getattr(task, "constraints", {}) or {}
+        vision = bool(constraints.get("vision"))
+        if vision:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract fields from this document image."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": str(constraints.get("image_url", ""))},
+                        },
+                    ],
+                }
+            )
         for h in context.get("history", []):
             messages.append(
                 {
@@ -77,7 +93,10 @@ class ModelLoopPolicy:
                     ),
                 }
             )
-        adapter = self._gateway.route({"inputs": [Modality.TEXT]})
+        requirements: dict = {"inputs": [Modality.TEXT]}
+        if vision:
+            requirements = {"inputs": [Modality.TEXT, Modality.IMAGE]}
+        adapter = self._gateway.route(requirements)
         resp = await adapter.infer(
             InferRequest(
                 model_id=adapter.capabilities().model_id,
