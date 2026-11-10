@@ -44,6 +44,7 @@ class _OutcomeLike(Protocol):
     status: str
     evidence_refs: list[str]
     actions: list[dict]
+    verifier_checks: list[dict]
 
 
 async def _infer_validated(gateway: ModelGateway, messages: list[dict], schema_hint: dict,
@@ -94,7 +95,9 @@ class LLMReflector:
                     "whose ONLY tools are: parse_document(doc_id); extract_fields"
                     "(doc_id, region); convert_format(doc_id, dpi); export_document"
                     "(doc_id, format); validate_form(doc_id). From the practice "
-                    "outcome and its ACTION TRACE, infer reusable CAUSAL rules about "
+                    "outcome, its ACTION TRACE, and the ACCEPTANCE FEEDBACK (verifier "
+                    "checks with failure details — this is the environment telling you "
+                    "WHAT went wrong), infer reusable CAUSAL rules about "
                     "HOW TO CALL these tools — which parameter values decide success "
                     "(e.g. dpi thresholds, region choice, format-specific preconditions) "
                     "and why. Each rule MUST carry a structured claim: "
@@ -120,6 +123,9 @@ class LLMReflector:
                             "evidence_ref_count": len(outcome.evidence_refs),
                         },
                         "action_trace": list(getattr(outcome, "actions", []) or []),
+                        "acceptance_feedback": list(
+                            getattr(outcome, "verifier_checks", []) or []
+                        ),
                     },
                     ensure_ascii=False,
                 ),

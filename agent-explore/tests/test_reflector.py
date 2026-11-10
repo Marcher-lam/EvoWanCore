@@ -118,3 +118,26 @@ async def test_reflector_prompt_carries_action_trace() -> None:
     assert "dpi" in prompt and '"status": "succeeded"' in prompt.replace("'", '"'), (
         "提示须含动作轨迹（LLM 推断因果的依据）"
     )
+
+
+class _OutcomeWithFeedback:
+    task_id = "extract_doc_2"
+    title = "抽取练习"
+    status = "failed"
+    evidence_refs = ["e1"]
+    actions = [{"capability_id": "extract_fields",
+                "arguments": {"doc_id": "doc_2"}, "status": "succeeded"}]
+    verifier_checks = [{"check": "fields_match", "detail": "字段值须与真值一致且未被串栏污染"}]
+
+
+async def test_reflector_prompt_carries_acceptance_feedback() -> None:
+    """T16 迭代 2：提示须含验收反馈（失败 detail）——环境反馈是因果推断的关键证据。"""
+    import json
+
+    llm_output = {"proposals": []}
+    gw, fake = _gateway([InferResponse(text=json.dumps(llm_output))])
+    reflector = LLMReflector(gateway=gw, model_id="m-r")
+    assert await reflector(_Task(), _OutcomeWithFeedback()) == []
+    prompt = " ".join(m["content"] for m in fake.recorded_requests[0].messages)
+    assert "串栏污染" in prompt, "验收反馈须进入提示"
+    assert "acceptance_feedback" in prompt or "ACCEPTANCE FEEDBACK" in prompt

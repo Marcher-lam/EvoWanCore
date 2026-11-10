@@ -49,6 +49,7 @@ class PracticeOutcome(BaseModel):
     status: Literal["passed", "failed", "error"] = "failed"
     evidence_refs: list[str] = []
     actions: list[dict] = []  # 动作轨迹（capability_id/arguments/status）——reflector 因果依据
+    verifier_checks: list[dict] = []  # 验收反馈（含失败 detail）——环境反馈信号
     error: dict | None = None
 
 
@@ -272,6 +273,7 @@ class ExplorationController:
         evidence_refs: list[list[str]] = []
         proposed: dict[str, dict] = {}
         actions: list[dict] = []
+        verifier_checks: list[dict] = []
         async for e in runtime.events(run.id):
             if e.type == "ActionProposed":
                 proposed[e.subject_id] = {
@@ -285,6 +287,8 @@ class ExplorationController:
                         "status": "succeeded" if e.type == "ActionSucceeded" else "failed",
                     }
                 )
+            elif e.type == "RunVerified":
+                verifier_checks = list(e.payload.get("checks", []))
             if e.type == "ActionSucceeded":
                 evidence_refs.append(e.payload.get("evidence_refs", []))
         flat = [ref for group in evidence_refs for ref in group]
@@ -296,6 +300,7 @@ class ExplorationController:
             status=status,
             evidence_refs=flat,
             actions=actions,
+            verifier_checks=verifier_checks,
         )
 
     # ---------- 记忆合并（BRS 波后按序 / DRS 每步） ----------
