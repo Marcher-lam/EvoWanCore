@@ -46,10 +46,24 @@ class LMStudioVLM:
         if request.tools:
             payload["tools"] = request.tools
             payload["tool_choice"] = "auto"
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions", json=payload
-            )
+        # 自愈：LM Studio 空闲驱逐/加载被取消时（"Model unloaded"/"Failed to load"）
+        # 等待后重试（JIT 重载最多 3 次，间隔递增）——v4 曾因此类瞬态全崩
+        import asyncio as _asyncio
+
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions", json=payload
+                )
+                if resp.status_code == 400:
+                    body = resp.text
+                    if "unloaded" in body or "Failed to load" in body:
+                        await _asyncio.sleep(15 * (attempt + 1))
+                        continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
+        else:
             resp.raise_for_status()
             data = resp.json()
         msg = data["choices"][0]["message"]
