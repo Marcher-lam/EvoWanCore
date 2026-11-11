@@ -591,3 +591,60 @@ def test_capability_schemas_are_valid_json_schema() -> None:
             f"工具 {s['function']['name']} 的 parameters 必须是合法 JSON Schema"
         )
         assert set(params.get("properties", {})) == {"doc_id", "fields"}
+
+
+async def test_cancel_state_cleaned_after_terminal(tmp_path: Path) -> None:
+    """M11：终态后 cancel 状态清理——_cancelled/_cancel_events 不随运行数无限增长。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[
+            InferResponse(tool_calls=[{"id": "c1", "name": "extract_fields",
+                                       "arguments": {"doc": "a"}}]),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    run = await env.runtime.submit(_spec(), env.agent())
+    assert run.state.value == "succeeded"
+    await env.runtime.cancel(run.id)  # 终态 run：cancel 短路返回
+    # 主动清理点：任何 submit 完成后（终态落定）其 cancel 痕迹应可被回收
+    # 实现：verify_and_finish 终态迁移后调用 _cleanup_cancel_state
+    assert run.id not in env.runtime._cancelled, "终态 run 的取消标记应清理"  # noqa: SLF001
+    assert run.id not in env.runtime._cancel_events, "终态 run 的取消事件应清理"  # noqa: SLF001
+
+
+async def test_cancel_state_survives_during_active_run(tmp_path: Path) -> None:
+    """清理不得过早：RUNNING 中的取消标记在 run 结束前保持可用。"""
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def slow(args):  # noqa: ARG001
+        await release.wait()
+        return {"late": True}
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(
+            tool_calls=[{"id": "c1", "name": "extract_fields", "arguments": {}}])],
+        handler=slow,
+    )
+    submit_task = asyncio.create_task(env.runtime.submit(_spec(), env.agent()))
+    run_id = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        async for e in env.event_log.iter_events():
+            if e.type == "ActionDispatched":
+                run_id = e.correlation_id
+                break
+        if run_id:
+            break
+    await env.runtime.cancel(run_id)
+    assert run_id in env.runtime._cancelled  # noqa: SLF001 — 活跃期保持
+    release.set()
+    run = await submit_task
+    assert run.state.value == "cancelled"
+    assert run_id not in env.runtime._cancelled  # noqa: SLF001 — 终态后清理

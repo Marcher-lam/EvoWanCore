@@ -325,6 +325,11 @@ class AgentRuntime:
 
     # ---------- 取消 / 恢复 / 验证 ----------
 
+    def _cleanup_cancel_state(self, run_id: str) -> None:
+        """M11：终态后清 cancel 痕迹——字典缓慢泄漏修复。"""
+        self._cancelled.discard(run_id)
+        self._cancel_events.pop(run_id, None)
+
     async def cancel(self, run_id: str) -> None:
         run = await self._store.load_run(run_id)
         if run is None or run.state in {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}:
@@ -398,11 +403,14 @@ class AgentRuntime:
         if run is None:
             raise KeyError(f"run {run_id} 不存在")
         if run.state in {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}:
+            self._cleanup_cancel_state(run_id)
             return run
         if run.state is RunState.CANCELLING:
             old = run.state
             run = run_transition(run, RunState.CANCELLED)
-            return await self._save(run, old, run.state)
+            result = await self._save(run, old, run.state)
+            self._cleanup_cancel_state(run_id)
+            return result
 
         task = await self._store.load_task(run.task_id)
         evidence_refs: list[str] = []
@@ -415,8 +423,11 @@ class AgentRuntime:
         if run.state is RunState.CANCELLING:
             old = run.state
             run = run_transition(run, RunState.CANCELLED)
-            return await self._save(run, old, run.state)
+            result = await self._save(run, old, run.state)
+            self._cleanup_cancel_state(run_id)
+            return result
         if run.state is RunState.CANCELLED:
+            self._cleanup_cancel_state(run_id)
             return run
         old = run.state
         target = RunState.SUCCEEDED if result.passed else RunState.FAILED
@@ -426,4 +437,5 @@ class AgentRuntime:
             run,
             new_event("RunVerified", "run", run.id, passed=result.passed, checks=result.checks),
         )
+        self._cleanup_cancel_state(run_id)
         return run
