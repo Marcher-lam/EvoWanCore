@@ -550,3 +550,44 @@ async def test_vision_task_routes_to_vlm() -> None:
     await policy.propose_next_actions(run, {**context, "task": plain_spec})
     assert len(text_fake.recorded_requests) == 1, "非视觉任务仍走文本适配器"
     assert len(vlm_fake.recorded_requests) == 1
+
+
+def test_capability_schemas_are_valid_json_schema() -> None:
+    """真 VLM 复跑前置：LM Studio 严格校验工具 parameters——简写 schema
+    （{"doc_id": "str"}）必须归一为 {"type":"object","properties":...}。"""
+    from agent_core.runtime.runtime import AgentRuntime
+
+    registry = InMemoryCapabilityRegistry()
+
+    async def handler(args):  # noqa: ARG001
+        return {}
+
+    registry.bind(
+        CapabilityDescriptor(
+            id="loose_tool", type=CapabilityType.TOOL, name="简写工具",
+            input_schema={"doc_id": "str", "fields": "dict"},
+            side_effect_level="read", auth_scope=[],
+        ),
+        handler,
+    )
+    gw = ModelGateway()
+    gw.register(
+        FakeModelAdapter(
+            ModelCapabilities(model_id="m-x", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+            [],
+        )
+    )
+    runtime = AgentRuntime(
+        gateway=gw, registry=registry, policy_engine=DefaultPolicyEngine(),
+        event_log=SqliteEventLog(Path("/tmp/evlog_schema.db")),
+        state_store=SqliteStateStore(Path("/tmp/st_schema.db")),
+        evidence_store=SqliteEvidenceStore(Path("/tmp/ev_schema.db"), Path("/tmp/blobs_schema")),
+        verifier=StubVerifier(),
+    )
+    schemas = runtime._capability_schemas()  # noqa: SLF001
+    for s in schemas:
+        params = s["function"]["parameters"]
+        assert isinstance(params, dict) and params.get("type") == "object", (
+            f"工具 {s['function']['name']} 的 parameters 必须是合法 JSON Schema"
+        )
+        assert set(params.get("properties", {})) == {"doc_id", "fields"}
