@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from agent_adapters.realtime import RealtimeSessionAdapter
+from agent_adapters.realtime import RealtimeSessionAdapter, _Session
 from agent_core.models import SessionConfig, SessionEvent
 from websockets.asyncio.server import serve
 
@@ -159,3 +159,20 @@ async def test_stream_events_are_session_event_models() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_full_queue_counts_non_audio_drops() -> None:
+    """M5：满队列时非音频事件丢弃必须计数可见（不再静默）。"""
+    from agent_adapters.realtime import RealtimeSessionAdapter
+    from agent_core.models import SessionEvent
+
+    adapter = RealtimeSessionAdapter(endpoint="ws://invalid", api_key="x")  # 不真连
+    q: asyncio.Queue = asyncio.Queue(maxsize=2)
+    session = _Session(config=SessionConfig(model_id="m"), queue=q)
+    session.queue.put_nowait(SessionEvent(type="transcript_in", payload={}))
+    session.queue.put_nowait(SessionEvent(type="transcript_in", payload={}))
+    adapter._enqueue(session, SessionEvent(type="tool_call", payload={}))  # noqa: SLF001
+    assert session.dropped_events.get("tool_call", 0) == 1, (
+        "非音频丢弃必须有计数（不再静默）"
+    )
+    assert session.queue.qsize() == 2, "原有两个非音频事件不被丢（只丢 audio_out）"

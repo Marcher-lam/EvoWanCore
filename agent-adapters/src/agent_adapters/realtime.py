@@ -40,6 +40,8 @@ class _Session:
         self.ws = None
         self.resumed = False
         self.closing = False
+        self.dropped_events: dict[str, int] = {}  # M5：丢弃计数可见（不再静默）
+        self.reader_task: asyncio.Task | None = None  # M5：读循环强引用（防 GC 断流）
 
 
 class RealtimeSessionAdapter:
@@ -80,7 +82,7 @@ class RealtimeSessionAdapter:
         session = _Session(config, asyncio.Queue(maxsize=_QUEUE_MAX))
         self._sessions[session_id] = session
         await self._connect(session)
-        asyncio.create_task(self._read_loop(session_id))
+        session.reader_task = asyncio.create_task(self._read_loop(session_id))  # M5 强引用
         return session_id
 
     async def _read_loop(self, session_id: str) -> None:
@@ -136,22 +138,32 @@ class RealtimeSessionAdapter:
                 return
 
     def _enqueue(self, session: _Session, event: SessionEvent) -> None:
-        """有界队列背压：满时优先丢最旧的 audio_out 分片。"""
+        """有界队列背压：满时优先丢最旧的 audio_out 分片。
+
+        M5：一切丢弃计数可见（dropped_events 按事件类型累计）——非音频事件
+        挤不进满队列时不再静默吞掉。
+        """
         if session.queue.full():
-            dropped = False
+            dropped_audio = False
             for _i in range(session.queue.qsize()):
                 try:
                     candidate = session.queue.get_nowait()
                 except asyncio.QueueEmpty:  # pragma: no cover
                     break
-                if candidate.type == "audio_out" and not dropped:
-                    dropped = True  # 丢弃，不入回
-                    continue
+                if candidate.type == "audio_out" and not dropped_audio:
+                    dropped_audio = True
+                    session.dropped_events["audio_out"] = (
+                        session.dropped_events.get("audio_out", 0) + 1
+                    )
+                    continue  # 丢弃，不入回
                 session.queue.put_nowait(candidate)
         try:
             session.queue.put_nowait(event)
-        except asyncio.QueueFull:  # pragma: no cover
-            pass
+        except asyncio.QueueFull:
+            # 队列仍满（无非音频可腾位）：本事件丢弃并计数——不再静默
+            session.dropped_events[event.type] = (
+                session.dropped_events.get(event.type, 0) + 1
+            )
 
     async def stream(self, session_id: str):
         session = self._sessions[session_id]
