@@ -508,3 +508,36 @@ async def test_publish_vetoes_unauditable_claims(tmp_path: Path, corpus) -> None
         assert good.verification.value == "verified", "审计过的 claim 应正常发布"
     finally:
         evo_mod.EvolutionController = original
+
+
+async def test_submit_normalizes_numeric_strings(tmp_path: Path, corpus) -> None:
+    """真 VLM 复跑前置：模型常把数字读成字符串（"18288"）——交付区归一化为真值类型，
+    程序化判分对照值语义而非类型。"""
+
+    from agent_core.models import FakeModelAdapter, InferResponse, Modality, ModelCapabilities
+
+    task = next(t for t in corpus.tasks if t["dimension"] == "extract")
+    doc = next(d for d in corpus.documents if d["id"] == task["doc_id"])
+    truth = {f["name"]: f["value"] for f in doc["fields"]}
+    # 模型把 int 字段全部读成字符串，invoice_no 保持字符串
+    str_fields = {k: str(v) for k, v in truth.items()}
+    fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT},
+                          tools={"native_tool_call"}),
+        [
+            _tool_call("submit_extracted_fields",
+                       {"doc_id": doc["id"], "fields": str_fields}),
+            InferResponse(text="done"),
+        ],
+    )
+    app = build_app(model_adapter=fake, db_path=tmp_path / "n.db",
+                    blob_dir=tmp_path / "nb", corpus=corpus)
+    run = await app.solve(task)
+    assert run.state.value == "succeeded", (
+        "数字字符串提交须被归一化并按真值判过（真 VLM 输出形态）"
+    )
+    submitted = app._derived.get(f"extract_submission:{doc['id']}")  # noqa: SLF001
+    assert submitted and submitted["fields"]["field_0"] == truth["field_0"], (
+        "交付区存归一化后的值（int），而非原始字符串"
+    )
+    assert isinstance(submitted["fields"]["field_0"], int)
