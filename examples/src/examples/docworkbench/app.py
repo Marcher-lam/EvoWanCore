@@ -42,6 +42,20 @@ DIM_TOOL = {
 ENV_VERSION = "workbench-1"
 
 
+class _LazyImageUrls:
+    """doc_id → data URL（读时查 derived 的 render_scale 决定 2x）——练习任务
+    在 convert 后重读时取到放大版。"""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def get(self, doc_id, default=None):
+        png = self._app._upscaled_png(doc_id)  # noqa: SLF001
+        if not png:
+            return default
+        return f"data:image/png;base64,{base64.b64encode(png).decode()}"
+
+
 class WorkbenchLoopPolicy(ModelLoopPolicy):
     """v4 压缩：交付工具成功即转验证（真 VLM 每次提议 30-80s，空转到 max_steps
     是实验时间黑洞——run1 实测均 7.1 次提议/任务）。"""
@@ -148,6 +162,23 @@ class DocumentAgentApp:
         """app 网关（物理适配器外已包 CountingAdapter——注入组件共享计量）。"""
         return self._gateway
 
+    def _upscaled_png(self, doc_id: str) -> bytes:
+        """派生文档（convert 后 render_scale=2）读图用 2x PNG；原始文档用原渲染。"""
+        import io
+
+        from PIL import Image
+
+        derived = self._derived.get(doc_id)
+        scale = (derived or {}).get("render_scale", 1) if derived else 1
+        png = self._corpus.assets.get(doc_id, b"")
+        if scale == 1 or not png:
+            return png
+        img = Image.open(io.BytesIO(png))
+        big = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+        buf = io.BytesIO()
+        big.save(buf, format="PNG")
+        return buf.getvalue()
+
     def use_reflector(self, reflector) -> None:
         """注入式 reflector（V2 T10）：LLMReflector 须共享 app gateway 以计入真实调用。"""
         self._reflector_impl = reflector
@@ -177,7 +208,7 @@ class DocumentAgentApp:
         # T21：感知任务（image_required）→ vision 约束 + 渲染 PNG 作 data URL
         constraints: dict = {}
         if corpus_task.get("image_required"):
-            png = self._corpus.assets.get(corpus_task["doc_id"], b"")
+            png = self._upscaled_png(corpus_task["doc_id"])
             constraints = {
                 "vision": True,
                 "image_url": f"data:image/png;base64,{base64.b64encode(png).decode()}",
@@ -214,14 +245,7 @@ class DocumentAgentApp:
                 "environment_version": ENV_VERSION,
                 "practice_pool": self._practice_pool(),
                 "model_counter": self._model_counter,
-                "image_urls": {
-                    t["doc_id"]: (
-                        f"data:image/png;base64,"
-                        f"{base64.b64encode(self._corpus.assets.get(t['doc_id'], b'')).decode()}"
-                    )
-                    for t in self._corpus.tasks
-                    if t.get("image_required")
-                },
+                "image_urls": _LazyImageUrls(self),
             },
         )
         # 探索产出的候选经验：验证通过后发布（对 solve 生效）
@@ -329,7 +353,7 @@ class DocumentAgentApp:
         def _spec_for(t: dict) -> TaskSpec:
             constraints: dict = {}
             if t.get("image_required"):
-                png = self._corpus.assets.get(t["doc_id"], b"")
+                png = self._upscaled_png(t["doc_id"])
                 constraints = {
                     "vision": True,
                     "image_url": f"data:image/png;base64,{base64.b64encode(png).decode()}",

@@ -126,9 +126,12 @@ def convert_format(doc: dict, dpi: int = 200) -> dict:
         return {**doc, "fields": kept, "lossy": True, "dpi": dpi}
     if dpi >= _REQUIRED_DPI:
         pages = [{**p, "contrast": 1.0} for p in doc["pages"]]
+        render_scale = 2  # 真 VLM OCR 精度（27b 探针：低对比 1x 首位数字错，2x 全对）
     else:
         pages = doc["pages"]
+        render_scale = 1
     return {**doc, "pages": pages, "lossy": False, "dpi": dpi,
+            "render_scale": render_scale,
             "export_ready": dpi >= _SAFE_EXPORT_DPI}
 
 
