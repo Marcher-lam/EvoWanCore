@@ -599,3 +599,27 @@ async def test_loop_stops_after_terminal_tool_success(tmp_path: Path, corpus) ->
     events = [e async for e in app._event_log.iter_events(run.id)]  # noqa: SLF001
     proposed = [e for e in events if e.type == "ActionProposed"]
     assert len(proposed) <= 2, f"交付后不得空转提议（实测 {len(proposed)} 次）"
+
+
+async def test_submit_accepts_json_string_fields(tmp_path: Path, corpus) -> None:
+    """27b 真模型实测：fields 常以 JSON 字符串传入——handler 须解析（曾连环
+    ValueError 致 run 空转 23 次提议）。"""
+    from agent_core.models import FakeModelAdapter, Modality, ModelCapabilities
+
+    task = next(t for t in corpus.tasks if t["dimension"] == "extract")
+    doc = next(d for d in corpus.documents if d["id"] == task["doc_id"])
+    truth = {f["name"]: f["value"] for f in doc["fields"]}
+    import json as _json
+
+    str_fields = _json.dumps({k: str(v) for k, v in truth.items()})
+    fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}, tools={"native_tool_call"}),
+        [
+            _tool_call("submit_extracted_fields",
+                       {"doc_id": doc["id"], "fields": str_fields}),
+        ],
+    )
+    app = build_app(model_adapter=fake, db_path=tmp_path / "s.db",
+                    blob_dir=tmp_path / "sb", corpus=corpus)
+    run = await app.solve(task)
+    assert run.state.value == "succeeded", "JSON 字符串 fields 须被解析并按真值判过"
