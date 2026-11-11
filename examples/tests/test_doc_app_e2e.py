@@ -73,27 +73,27 @@ async def test_explore_then_solve_beats_cold_solve(tmp_path: Path, corpus) -> No
     convert_task = next(t for t in corpus.tasks if t["dimension"] == "convert")
     export_doc_id = export_task["doc_id"]
 
+    # WorkbenchLoopPolicy（v4 压缩）：交付工具成功即转验证——每次 solve 吃到
+    # 交付动作为止，不再需要收尾 "done" 响应
     responses = [
-        # 1) 冷启动 solve：朴素导出（不知道隐藏约束）
+        # 1) 冷启动 solve：朴素导出（不知道隐藏约束）→ 交付后即验证（fail）
         _tool_call("export_document", {"doc_id": export_doc_id, "format": "xlsx"}),
-        InferResponse(text="done"),
         # 2) explore：课程出一道转换练习（命中隐藏约束）
         InferResponse(text=_practice_plan(convert_task["id"], "练习无损转换")),
         _tool_call("convert_format", {"doc_id": convert_task["doc_id"], "dpi": 200}),
-        InferResponse(text="done"),
     ]
     # 2.5) V2 T12 通用评测门：候选（convert 维度）过父子对比 + 回归
     #      with 臂 3 题 dpi=200 全过；parent 臂 3 题白卷；回归 2×2 白卷（等分无回归）
-    for t in [t for t in corpus.tasks if t["dimension"] == "convert"][:3]:
-        responses.append(_tool_call("convert_format", {"doc_id": t["doc_id"], "dpi": 200}))
-        responses.append(InferResponse(text="done"))
+    responses.extend(
+        _tool_call("convert_format", {"doc_id": t["doc_id"], "dpi": 200})
+        for t in [t for t in corpus.tasks if t["dimension"] == "convert"][:3]
+    )
     responses.extend(InferResponse(text="give up") for _ in range(3))
     responses.extend(InferResponse(text="give up") for _ in range(4))
     responses += [
         # 3) 探索后 solve：先转换再导出（已发布规则被检索进上下文）
         _tool_call("convert_format", {"doc_id": export_doc_id, "dpi": 200}),
         _tool_call("export_document", {"doc_id": export_doc_id, "format": "xlsx"}),
-        InferResponse(text="done"),
     ]
 
     fake = FakeModelAdapter(
@@ -270,10 +270,11 @@ def _convert_tasks(corpus, n: int = 3) -> list[dict]:
 def _gate_script_good_rule(corpus) -> list[InferResponse]:
     """门评测脚本：with 臂按规则 dpi=200 全过（tool+done×3）；
     parent 臂交白卷×3；回归 2 题×2 臂交白卷（等分 → 无回归违例）。"""
-    responses: list[InferResponse] = []
-    for t in _convert_tasks(corpus):
-        responses.append(_tool_call("convert_format", {"doc_id": t["doc_id"], "dpi": 200}))
-        responses.append(InferResponse(text="done"))
+    # WorkbenchLoopPolicy：convert 交付成功即停——with 臂每题 1 个 tool 响应
+    responses: list[InferResponse] = [
+        _tool_call("convert_format", {"doc_id": t["doc_id"], "dpi": 200})
+        for t in _convert_tasks(corpus)
+    ]
     responses.extend(InferResponse(text="give up") for _ in range(3))  # parent 臂
     responses.extend(InferResponse(text="give up") for _ in range(4))  # 回归
     return responses
@@ -290,7 +291,6 @@ async def test_good_rule_publishes_via_gate(tmp_path: Path, corpus) -> None:
         [InferResponse(text=_practice_plan(convert_task["id"], "练习无损转换"))]
         + [
             _tool_call("convert_format", {"doc_id": convert_task["doc_id"], "dpi": 200}),
-            InferResponse(text="done"),
         ]
         + _gate_script_good_rule(corpus),
     )
@@ -576,3 +576,25 @@ async def test_vision_marker_flows_to_gate_and_practice(tmp_path: Path) -> None:
     pool = app._practice_pool()  # noqa: SLF001
     extract_pool = next(p for p in pool if p["dimension"] == "extract")
     assert extract_pool.get("image_required") is True, "练习池条目须带 image_required"
+
+
+async def test_loop_stops_after_terminal_tool_success(tmp_path: Path, corpus) -> None:
+    """v4 压缩（T2 诊断迭代）：交付工具成功即转验证——不再继续提议（27b 每次提议
+    30-80s，run1 实测均 7.1 次/任务、最多 15 次的空转是时间黑洞）。"""
+    from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
+
+    hard = generate_corpus(seed=5, size=8, difficulty=0.8, perceptual=True)
+    task = next(t for t in hard.tasks if t["dimension"] == "extract")
+    fake = FakeModelAdapter(ModelCapabilities(model_id="m-app", inputs={Modality.TEXT}), [])
+    app = build_app(
+        model_adapter=fake, db_path=tmp_path / "y.db", blob_dir=tmp_path / "yb",
+        corpus=hard,
+        vlm_factory=lambda c, d: WorkbenchFakeVLM(c, d),
+    )
+    # FakeVLM 无规则时直接 submit（1 次提议即交付）——yield 生效则提议停在交付处；
+    # 旧行为会继续提议到 max_steps（RED 已实测脚本耗尽）。
+    run = await app.solve(task)
+    assert run.state.value in ("succeeded", "failed")
+    events = [e async for e in app._event_log.iter_events(run.id)]  # noqa: SLF001
+    proposed = [e for e in events if e.type == "ActionProposed"]
+    assert len(proposed) <= 2, f"交付后不得空转提议（实测 {len(proposed)} 次）"

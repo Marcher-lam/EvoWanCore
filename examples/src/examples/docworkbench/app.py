@@ -17,7 +17,7 @@ from agent_core.memory.writer import DefaultConsolidator, DefaultMemoryWriter, V
 from agent_core.models import ModelAdapter
 from agent_core.policy import DefaultPolicyEngine
 from agent_core.run import RunHandle
-from agent_core.runtime.driver import AgentSpec, VerificationResult
+from agent_core.runtime.driver import AgentSpec, ModelLoopPolicy, VerificationResult
 from agent_core.runtime.eventlog import SqliteEventLog
 from agent_core.runtime.runtime import AgentRuntime
 from agent_core.runtime.statestore import SqliteStateStore
@@ -39,6 +39,24 @@ DIM_TOOL = {
 }
 
 ENV_VERSION = "workbench-1"
+
+
+class WorkbenchLoopPolicy(ModelLoopPolicy):
+    """v4 压缩：交付工具成功即转验证（真 VLM 每次提议 30-80s，空转到 max_steps
+    是实验时间黑洞——run1 实测均 7.1 次提议/任务）。"""
+
+    def should_yield(self, run, context) -> bool:  # noqa: ARG002
+        task = context.get("task")
+        kind = str(getattr(task, "kind", "")).removeprefix("wb:")
+        goal = getattr(task, "goal", {}) or {}
+        dim = kind if kind in DIM_TOOL else goal.get("dimension", "")
+        wanted = DIM_TOOL.get(str(dim))
+        if not wanted:
+            return False
+        return any(
+            h.get("capability_id") == wanted and h.get("status") == "succeeded"
+            for h in context.get("history", [])
+        )
 
 
 class WorkbenchVerifier:
@@ -556,6 +574,8 @@ def build_app(
         memory_retriever=retriever,
         context_assembler=assembler,
         environment_version=ENV_VERSION,
+        execution_policy=WorkbenchLoopPolicy(gateway=gateway, agent=AgentSpec(
+            id="doc_agent", role="document worker", model_id="m-app")),
     )
 
     controller = ExplorationController(
