@@ -93,13 +93,22 @@ class AgentRuntime:
         return run
 
     def _capability_schemas(self) -> list[dict]:
+        def _params(schema: dict | None) -> dict:
+            """工具 parameters 归一为合法 JSON Schema（真 VLM 端严格校验：
+            简写 {"doc_id": "str"} → {"type":"object","properties":...}）。"""
+            if not isinstance(schema, dict) or not schema:
+                return {"type": "object"}
+            if "type" in schema:
+                return schema
+            return {"type": "object", "properties": {k: {"type": "string"} for k in schema}}
+
         return [
             {
                 "type": "function",
                 "function": {
                     "name": d.id,
                     "description": d.name,
-                    "parameters": d.input_schema or {"type": "object"},
+                    "parameters": _params(d.input_schema),
                 },
             }
             for d in self._registry.discover({})

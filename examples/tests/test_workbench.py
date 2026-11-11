@@ -232,3 +232,21 @@ def test_perceptual_extract_docs_carry_trap() -> None:
         assert any(p.get("contrast", 1.0) < 0.5 for p in doc["pages"]), (
             "extract 扫描文档必须含低对比度页（陷阱载体）"
         )
+
+
+def test_render_shows_all_fields() -> None:
+    """真 VLM 复跑前置：渲染必须画出全部字段（V1 的 [:6] 截断让 8 字段文档漏 2）。"""
+    corpus = generate_corpus(seed=5, size=8, difficulty=0.8)
+    doc = max(corpus.documents, key=lambda d: len(d["fields"]))
+    if len(doc["fields"]) <= 6:  # 找不到 >6 字段的文档则直接验证最大字段文档
+        doc = next(d for d in corpus.documents if len(d["fields"]) >= 6)
+    # 渲染器对每个字段都画了文本（通过 _render_png 的确定性：对比全字段 vs 截断版）
+    from examples.docworkbench.generator import _render_png
+
+    full = _render_png(doc)
+    truncated = _render_png({**doc, "fields": doc["fields"][: max(len(doc["fields"]) - 1, 1)]})
+    assert full != truncated, "少一个字段渲染字节必须不同（每字段都入画）"
+    # 且至少 7 字段文档（难度 0.8 有 7-8 字段）全量渲染不等于只画 6 个的版本
+    if len(doc["fields"]) > 6:
+        only6 = _render_png({**doc, "fields": doc["fields"][:6]})
+        assert full != only6, "第 7+ 字段必须被渲染（截断 bug 修复）"

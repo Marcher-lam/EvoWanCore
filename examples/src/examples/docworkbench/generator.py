@@ -86,8 +86,16 @@ def _render_png(doc: dict) -> bytes:
     import io
     import random as _random
 
-    page_h, width = 110, 260
-    img = Image.new("RGB", (width, page_h * len(doc["pages"]) + 16), "white")
+    n_fields = len(doc["fields"])
+    width = 260
+
+    def _page_height(layout: str) -> int:
+        cols = 2 if layout == "two_column" else 1
+        rows = max(1, -(-n_fields // cols))
+        return max(110, 20 + rows * 16 + 14)
+
+    page_heights = [_page_height(p.get("layout", "report")) for p in doc["pages"]]
+    img = Image.new("RGB", (width, sum(page_heights) + 16), "white")
     draw = ImageDraw.Draw(img)
     draw.text((6, 2), f"{doc['id']} [{doc['layout']}/{doc['kind']}]", fill="black")
 
@@ -96,19 +104,22 @@ def _render_png(doc: dict) -> bytes:
         contrast = float(page.get("contrast", 1.0))
         fill = _text_fill(contrast)
         layout = page.get("layout", "report")
+        page_h = page_heights[pi]
         # 页框 + 网格结构线（表格网格是结构信号）
         draw.rectangle([4, y, width - 4, y + page_h - 6], outline="black")
         if layout == "two_column":
             draw.line([width // 2, y, width // 2, y + page_h - 6], fill="black")
         elif layout == "form":
-            for row in range(1, 4):
-                draw.line([8, y + row * 24, width - 8, y + row * 24], fill="black")
+            row_step = max(16, min(24, page_h // (n_fields + 1)))
+            for row in range(1, min(4, n_fields + 1)):
+                draw.line([8, y + row * row_step, width - 8, y + row * row_step], fill="black")
         elif layout == "chart":
             draw.rectangle([20, y + 20, width - 20, y + page_h - 26], outline="black")
 
-        # 字段值按版式落位（双栏各半）；对比度决定可读性
+        # 字段值按版式落位（双栏各半）；对比度决定可读性。
+        # 真值全量入画（[:6] 截断曾让 8 字段文档漏 2 个字段——真 VLM 复跑前置修复）
         cols = [12, width // 2 + 8] if layout == "two_column" else [12]
-        for i, f in enumerate(doc["fields"][:6]):
+        for i, f in enumerate(doc["fields"]):
             cx = cols[i % len(cols)]
             cy = y + 10 + (i // len(cols)) * 16
             draw.text((cx, cy), f"{f['name']}={f['value']}", fill=fill)

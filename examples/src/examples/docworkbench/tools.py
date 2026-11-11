@@ -90,9 +90,21 @@ def extract_fields_from_image(doc: dict) -> dict:
     }
 
 
+def _normalize_value(value):
+    """真 VLM 常把数字读成字符串（"18288"）——纯数字串归一为 int，
+    其余（TMP-72780 等）保持原样；判分对照值语义。"""
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value
+
+
 def submit_extracted_fields(doc_id: str, fields: dict) -> dict:
-    """交付抽取结果（T18）：模型读图后提交；交付载荷进证据链，由验收对照真值判分。"""
-    return {"doc_id": doc_id, "fields": dict(fields), "source": "image_read"}
+    """交付抽取结果（T18）：模型读图后提交；交付载荷进证据链，由验收对照真值判分。
+
+    字段值经 _normalize_value 归一（真 VLM 复跑前置：字符串数字→int）。
+    """
+    normalized = {k: _normalize_value(v) for k, v in dict(fields).items()}
+    return {"doc_id": doc_id, "fields": normalized, "source": "image_read"}
 
 
 def convert_format(doc: dict, dpi: int = 200) -> dict:

@@ -195,6 +195,14 @@ class DocumentAgentApp:
                 "environment_version": ENV_VERSION,
                 "practice_pool": self._practice_pool(),
                 "model_counter": self._model_counter,
+                "image_urls": {
+                    t["doc_id"]: (
+                        f"data:image/png;base64,"
+                        f"{base64.b64encode(self._corpus.assets.get(t['doc_id'], b'')).decode()}"
+                    )
+                    for t in self._corpus.tasks
+                    if t.get("image_required")
+                },
             },
         )
         # 探索产出的候选经验：验证通过后发布（对 solve 生效）
@@ -204,7 +212,13 @@ class DocumentAgentApp:
     def _practice_pool(self) -> list[dict]:
         ids = self.practice_task_ids
         return [
-            {"id": t["id"], "dimension": t["dimension"], "doc_id": t["doc_id"], "goal": t["goal"]}
+            {
+                "id": t["id"],
+                "dimension": t["dimension"],
+                "doc_id": t["doc_id"],
+                "goal": t["goal"],
+                "image_required": bool(t.get("image_required")),
+            }
             for t in self._corpus.tasks
             if t["id"] in ids
         ]
@@ -293,17 +307,24 @@ class DocumentAgentApp:
         leaked = {t["id"] for t in selected} & set(heldout_ids)
         if leaked:
             raise ValueError(f"评测门吃到保留集任务（红线）: {sorted(leaked)}")
-        return [
-            TaskSpec(
+        def _spec_for(t: dict) -> TaskSpec:
+            constraints: dict = {}
+            if t.get("image_required"):
+                png = self._corpus.assets.get(t["doc_id"], b"")
+                constraints = {
+                    "vision": True,
+                    "image_url": f"data:image/png;base64,{base64.b64encode(png).decode()}",
+                }
+            return TaskSpec(
                 id=t["id"],
                 kind=f"wb:{t['dimension']}",
                 goal={"what": t["goal"], "doc_id": t["doc_id"]},
                 input_schema={},
-                constraints={},
+                constraints=constraints,
                 acceptance_criteria=[{"check": "workbench_programmatic"}],
             )
-            for t in selected
-        ]
+
+        return [_spec_for(t) for t in selected]
 
     async def _publish_candidates(self) -> None:
         """V2 T12 通用评测门：EvolutionController 父子对比 + 回归通过才发布。

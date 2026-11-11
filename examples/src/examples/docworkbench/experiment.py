@@ -30,6 +30,7 @@ class ExperimentConfig:
     max_waves: int = 4
     use_llm_reflector: bool = False  # V2 B 检查点：真 LLM 反思（T10）
     use_fake_vlm: bool = False  # v3 感知实验：WorkbenchFakeVLM 读图（T23）
+    real_vlm_model: str | None = None  # 真 VLM 复跑：LM Studio 模型名（§6.1 可选）
 
 
 class ArmReport(BaseModel):
@@ -159,6 +160,11 @@ def _arm_stats(
 
 
 def _vlm_factory(config: ExperimentConfig):
+    if config.real_vlm_model is not None:
+        from examples.docworkbench.lmstudio_vlm import LMStudioVLM
+
+        model = config.real_vlm_model
+        return lambda corpus, derived: LMStudioVLM(model)
     if not config.use_fake_vlm:
         return None
     from examples.docworkbench.fake_vlm import WorkbenchFakeVLM
