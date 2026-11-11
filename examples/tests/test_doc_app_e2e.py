@@ -541,3 +541,34 @@ async def test_submit_normalizes_numeric_strings(tmp_path: Path, corpus) -> None
         "交付区存归一化后的值（int），而非原始字符串"
     )
     assert isinstance(submitted["fields"]["field_0"], int)
+
+
+async def test_vision_marker_flows_to_gate_and_practice(tmp_path: Path) -> None:
+    """真 VLM 复跑缺陷修复：image_required 必须随门评测与练习池任务传递——
+    否则这些 extract solve 被文本模型接管（值只在渲染 PNG 里，只能幻觉）。"""
+    from agent_core.models import FakeModelAdapter, InferResponse, Modality, ModelCapabilities
+
+    hard = generate_corpus(seed=41, size=8, difficulty=0.8, perceptual=True)
+    practice, _ = split_corpus(hard, practice_ratio=0.5)
+    extract_practice = next(t for t in practice.tasks if t["dimension"] == "extract")
+    # 门任务带视觉约束
+    fake = FakeModelAdapter(
+        ModelCapabilities(model_id="m-app", inputs={Modality.TEXT},
+                          tools={"native_tool_call"}),
+        [InferResponse(text="give up")],  # 文本适配器不应接到视觉任务——脚本不耗尽即证
+    )
+    app = build_app(model_adapter=fake, db_path=tmp_path / "vm.db",
+                    blob_dir=tmp_path / "vmb", corpus=hard, practice_part=practice)
+    gate_tasks = app._gate_tasks(  # noqa: SLF001
+        app.practice_task_ids, set(), dimensions=["extract"]
+    )
+    extract_gate = next(t for t in gate_tasks if t.id == extract_practice["id"])
+    assert extract_gate.constraints.get("vision") is True, "门任务须带视觉约束"
+    assert "data:image/png" in extract_gate.constraints.get("image_url", ""), (
+        "门任务须携带渲染 PNG data URL"
+    )
+
+    # 练习池条目带 image_required（controller 构造练习 spec 时传递视觉约束）
+    pool = app._practice_pool()  # noqa: SLF001
+    extract_pool = next(p for p in pool if p["dimension"] == "extract")
+    assert extract_pool.get("image_required") is True, "练习池条目须带 image_required"

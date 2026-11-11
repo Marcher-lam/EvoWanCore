@@ -259,12 +259,17 @@ class ExplorationController:
             "doc_id": pool_entry.get("doc_id"),
             **{k: v for k, v in task.objective.items() if k != "what"},
         }
+        constraints: dict = dict(task.constraints)
+        if pool_entry.get("image_required"):
+            image_url = (app_context.get("image_urls") or {}).get(pool_entry.get("doc_id"))
+            if image_url:
+                constraints.update({"vision": True, "image_url": image_url})
         spec = TaskSpec(
             id=task.id,
             kind=f"practice:{task.family.value}",
             goal=goal,
             input_schema={},
-            constraints=task.constraints,
+            constraints=constraints,
             acceptance_criteria=task.acceptance.pass_conditions or [{"check": "practice_done"}],
         )
         runtime: AgentRuntime = app_context["runtime"]
