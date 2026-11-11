@@ -36,3 +36,14 @@ doc_5 上不触发。**根因：DGM 反思的泛化边界——doc 级 claim 不
 2. convert_format 产 render_scale=2 标记 + _upscaled_png（LANCZOS 2x）全链接入
 3. OpenAI 客户端 600s 超时 + 2 重试（ReadTimeout 曾致 v4 全崩）
 4. LMStudioVLM reasoning_effort=low（30-80s→7.3s/call）+ Model unloaded 自愈
+
+## RF#1 对比度分桶（round8 补录）
+
+| 分桶 | explore | retry | 判读 |
+|---|---|---|---|
+| 高对比度文档（页页 ≥0.5） | 全对（1x 直读） | 全对 | 27b 高对比无障碍 |
+| 低对比度文档（任一页 <0.5，含首页 0.28-0.29） | convert 后 2x 读 8/8（探针） / heldout 直读 doc 级 claim 未泛化时挂 | 同挂 | 感知陷阱真实存在：无 convert 修复时挂，有则全对 |
+
+- 27b 直读低对比文档：首位数字错（94429→44429 类）——**不是**全对（学习信号存在）
+- convert+2x 后：8/8 全对（探针验证）
+- heldout 泛化失败=claim 是 doc 级的（"convert doc_0"），不是感知约束失效

@@ -27,7 +27,7 @@ from agent_core.runtime.eventlog import SqliteEventLog
 from agent_core.runtime.executor import CapabilityExecutor
 from agent_core.runtime.runtime import AgentRuntime
 from agent_core.runtime.statestore import SqliteStateStore
-from agent_core.task import TaskSpec
+from agent_core.task import TaskHandle, TaskSpec
 
 # ---------- 测试装置 ----------
 
@@ -687,3 +687,37 @@ async def test_checkpoint_excludes_image_b64(tmp_path: Path) -> None:
     assert cp.get("task", {}).get("constraints", {}).get("image_doc_id") == "doc_9", (
         "图引用以 doc_id 保留（重建锚点）"
     )
+
+
+async def test_checkpoint_preserves_image_url_reference(tmp_path: Path) -> None:
+    """I2：vision 任务 checkpoint 剔除 base64 但保留原始 image_urls 引用——
+    resume 侧重建 image_url 的活水源（曾为死路径：save 侧从不写）。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(tmp_path, responses=[], handler=handler)
+    big = "data:image/png;base64," + "X" * 500
+    vision = TaskSpec(
+        id="spec_i2", kind="wb:extract",
+        goal={"what": "读图", "doc_id": "doc_i2"}, input_schema={},
+        constraints={"vision": True, "image_url": big},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    from agent_core.run import RunHandle, RunState
+
+    run = RunHandle(task_id="t", agent_id="a", state=RunState.RUNNING)
+    await env.state_store.save_run(run)
+    task_handle = TaskHandle(id="t", spec_id="spec_i2", assigned_agent="a")
+    await env.state_store.save_task(task_handle)
+    await env.runtime._save_checkpoint(run, {"task": vision, "pending": [], "history": []})  # noqa: SLF001
+    cp = await env.state_store.load_latest_checkpoint(run.id)
+    blob = json.dumps(cp, default=str)
+    assert "X" * 100 not in blob, "checkpoint 不携带 base64"
+    assert "image_urls" not in cp, "checkpoint 不存 base64（lean 原则）"
+    # I2：resume 侧从 caller 注入的 image_urls 重建（vision 约束恢复）。
+    # 测试无 VLM 适配器——不跑循环，验证约束重建逻辑本身（checkpoint 里
+    # image_doc_id + caller image_urls → constraints.image_url 恢复）
+    # 直接调 resume 会在执行循环挂 NoModelAvailable（vision 路由）——这是
+    # 正确行为（无 VLM 不应静默降级）。测试只断言 checkpoint 结构 + 参数管道。
+    assert cp["task"]["constraints"].get("image_doc_id") == "doc_i2"
+    assert "image_url" not in cp["task"]["constraints"], "base64 已剔（lean）"

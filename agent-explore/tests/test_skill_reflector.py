@@ -173,3 +173,26 @@ async def test_contract_failure_triggers_revision(tmp_path) -> None:
     assert "72" in fake.recorded_requests[1].messages[-1]["content"], (
         "修订提示须携带实测 stdout（真模型据此定位）"
     )
+
+
+async def test_lineage_enforced_against_id_hijack(tmp_path) -> None:
+    """RF#5 血统：模型擅改 skill_id → 代码层强制收回 incumbent id + 同名版本 bump。"""
+    from agent_evolve.skill_sandbox import SkillSandbox
+
+    gw, _fake = _gateway([InferResponse(text=_valid_candidate_json())])
+    reflector = SkillReflector(gateway=gw, model_id="m-sr",
+                               sandbox=SkillSandbox(tmp_path / "ws"))
+    incumbent = SkillCandidate(
+        artifact={"skill_id": "incumbent_skill", "version": "1.2.3",
+                  "description": "d", "entrypoint": "main.py",
+                  "expected_outputs": {}, "known_failure_scenarios": [],
+                  "script_files": {"main.py": "print('ok')"}},
+        source_task_id="t",
+    )
+    task = type("T", (), {"id": "convert_doc_2", "title": "练", "family": _Fam()})()
+    candidate = await reflector(task, _Outcome(), incumbent=incumbent)
+    assert candidate is not None
+    art = candidate.artifact
+    assert art["skill_id"] == "incumbent_skill", "模型改名必须被收回（血统）"
+    # _valid_candidate_json 声明 version=0.2.0 ≠ incumbent 1.2.3 → 保留模型版（非同名）
+    assert art["version"] == "0.2.0"

@@ -364,7 +364,9 @@ class AgentRuntime:
     async def _load(self, run_id: str) -> RunHandle:
         return await self._store.load_run(run_id)
 
-    async def resume(self, run_id: str) -> RunHandle:
+    async def resume(
+        self, run_id: str, *, image_urls: dict[str, str] | None = None
+    ) -> RunHandle:
         run = await self._store.load_run(run_id)
         if run is None:
             raise KeyError(f"run {run_id} 不存在")
@@ -391,9 +393,9 @@ class AgentRuntime:
         if task_payload:
             constraints = task_payload.get("constraints") or {}
             if constraints.get("vision") and not constraints.get("image_url"):
-                # T10 minor：checkpoint 只存 image_doc_id——重建需注入方提供 image_urls
-                # （app.explore 的 app_context）；无映射时保留标记（后续路由按 vision 走）
-                image_urls = checkpoint.get("image_urls") or {}
+                # I2：checkpoint 只存 image_doc_id——resume 须由 caller 传入
+                # image_urls（caller 持有 corpus/assets）；无映射保留标记降级
+                image_urls = image_urls or {}
                 doc_ref = constraints.get("image_doc_id", "")
                 if doc_ref and doc_ref in image_urls:
                     constraints["image_url"] = image_urls[doc_ref]

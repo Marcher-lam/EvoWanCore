@@ -240,3 +240,30 @@ async def test_contract_accepts_substring_lists(tmp_path) -> None:
     partial.expected_outputs["ok"]["expect_stdout_contains"] = ["lossless", "absent-substring"]
     report2 = await sandbox.contract_test(partial)
     assert not report2.passed, "列表任一未命中 → 挂"
+
+
+async def test_skill_subprocess_minimal_env(tmp_path) -> None:
+    """I1 安全：沙箱子进程不得继承父环境（LLM 产出的技能代码可读密钥）。"""
+    import os
+
+    from agent_evolve.skill_sandbox import SkillArtifact, SkillSandbox
+
+    sandbox = SkillSandbox(tmp_path / "ws")
+    marker = "EWC_TEST_SECRET_DO_NOT_LEAK"
+    os.environ[marker] = "present"
+    try:
+        artifact = SkillArtifact(
+            skill_id="s_env", version="1", entrypoint="main.py",
+            expected_outputs={}, known_failure_scenarios=[], script_files={
+                "main.py": (
+                    "import os, json\n"
+                    f"leaked = os.environ.get('{marker}', 'ABSENT')\n"
+                    "print(json.dumps({'leaked': leaked}))\n"
+                )},
+        )
+        result = await sandbox.run(artifact, {})
+        assert result.status == "succeeded"
+        assert marker not in result.stdout, "父环境密钥不得泄入沙箱子进程"
+        assert "ABSENT" in result.stdout
+    finally:
+        del os.environ[marker]

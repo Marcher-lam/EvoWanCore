@@ -145,11 +145,15 @@ class SkillSandbox:
         entry = self._materialize(artifact)
         t0 = time.monotonic()
         preexec = _make_preexec(self._memory_limit_mb, self._cpu_limit_s)
+        # I1 安全：最小 env——技能代码是 LLM 产出，不得读父环境密钥
+        minimal_env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+                       "HOME": "/tmp", "PYTHONUNBUFFERED": "1"}
         proc = await asyncio.create_subprocess_exec(
             *self._wrap_argv([sys.executable, str(entry), json.dumps(args)]),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,  # 独立进程组，便于整组击杀
+            env=minimal_env,
             **({"preexec_fn": preexec} if preexec is not None else {}),
         )
         try:

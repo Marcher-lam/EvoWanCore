@@ -33,17 +33,16 @@ async def evaluate_skill(
     mini_batch: list[TaskSpec],
     runner: DualRunner,
     *,
-    sandbox: SkillSandbox | None = None,
+    sandbox: SkillSandbox,
     regression_scenarios: list[TaskSpec] | None = None,
 ) -> EvalReport:
     """契约门（先决）→ 父子对比 + 回归（与 EvolutionController.evaluate 同语义）。"""
-    if sandbox is not None:
-        contract = await sandbox.contract_test(candidate)
-        if not contract.passed:
-            failed = [c["name"] for c in contract.cases if not c["ok"]]
-            raise SkillContractViolation(
-                f"技能契约不符（实测未达声明行为）: {failed}——不进父子对比"
-            )
+    contract = await sandbox.contract_test(candidate)
+    if not contract.passed:
+        failed = [c["name"] for c in contract.cases if not c["ok"]]
+        raise SkillContractViolation(
+            f"技能契约不符（实测未达声明行为）: {failed}——不进父子对比"
+        )
 
     candidate_scores = [await runner(t, with_candidate=True) for t in mini_batch]
     parent_scores = [await runner(t, with_candidate=False) for t in mini_batch]

@@ -49,7 +49,8 @@ class SkillRegistryBridge:
                 try:
                     return json.loads(result.stdout.strip().splitlines()[-1])
                 except (ValueError, IndexError):
-                    return {"stdout": result.stdout.strip()}
+                    # I1 安全：不回传原始 stdout（最多 1MB 任意内容会流入模型上下文）
+                    return {"error": "skill stdout is not valid JSON"}
 
             return _run()
 
