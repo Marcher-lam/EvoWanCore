@@ -72,3 +72,40 @@ async def test_skill_version_bumps_and_old_handler_replaced(tmp_path: Path) -> N
         )
     )
     assert result.output["dpi"] == 300, "dispatch 命中新版脚本（floor=300）"
+
+
+async def test_rollback_restores_incumbent(tmp_path: Path) -> None:
+    """RF#4：发布 v2 → rollback → dispatch 命中 v1 行为（旧版可用，无旧版则注销）。"""
+    from agent_core.action import ActionMode, ActionRequest
+    from agent_core.runtime.executor import CapabilityExecutor
+
+    registry = InMemoryCapabilityRegistry()
+    sandbox = SkillSandbox(tmp_path / "ws")
+    bridge = SkillRegistryBridge(sandbox=sandbox, registry=registry)
+
+    v1 = _artifact("0.1.0", floor=150)
+    v2 = _artifact("0.2.0", floor=300)
+    bridge.register(v1)
+    bridge.register(v2)
+    assert registry.resolve("lossless_convert").version == "0.2.0"
+
+    bridge.rollback(v1)  # 回滚到 v1
+    desc = registry.resolve("lossless_convert")
+    assert desc.version == "0.1.0", "回滚后描述符回到 v1"
+
+    executor = CapabilityExecutor(registry=registry, skill_runner=None)
+    result = await executor.dispatch(
+        ActionRequest(
+            id="act_skill_rb", task_id="t", run_id="r", actor_id="a",
+            capability_id="lossless_convert",
+            arguments={"dpi": 72}, mode=ActionMode.EXECUTE,
+        )
+    )
+    assert result.output["dpi"] == 150, "dispatch 命中 v1 行为（floor=150）"
+
+    # 回滚到不存在更早版本的场景：注销技能（resolve 抛 KeyError）
+    bridge.unregister()
+    import pytest as _pytest
+
+    with _pytest.raises(KeyError):
+        registry.resolve("lossless_convert")

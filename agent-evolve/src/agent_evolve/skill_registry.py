@@ -21,6 +21,7 @@ class SkillRegistryBridge:
     def __init__(self, *, sandbox: SkillSandbox, registry: CapabilityRegistry) -> None:
         self._sandbox = sandbox
         self._registry = registry
+        self._history: dict[str, list[SkillArtifact]] = {}  # id → 已发布版本序（回滚依据）
 
     def register(self, artifact: SkillArtifact) -> CapabilityDescriptor:
         """发布登记：版本化描述符 + 沙箱 handler 绑定（同 id 再发布即版本递增覆盖）。"""
@@ -57,4 +58,17 @@ class SkillRegistryBridge:
             self._registry.rebind(descriptor, _handler)
         except KeyError:
             self._registry.bind(descriptor, _handler)
+        self._history.setdefault(artifact.skill_id, []).append(artifact)
         return descriptor
+
+    def rollback(self, incumbent: SkillArtifact) -> None:
+        """RF#4：回滚到指定前任版本（重新注册其行为）。"""
+        self.register(incumbent)
+
+    def unregister(self) -> None:
+        """无更早版本时的回滚语义：技能整体下架（历史清空）。"""
+        for versions in self._history.values():
+            for art in versions:
+                self._registry._by_id.pop(art.skill_id, None)  # noqa: SLF001
+                self._registry._bindings.pop(art.skill_id, None)  # noqa: SLF001
+        self._history.clear()
