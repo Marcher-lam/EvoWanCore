@@ -40,6 +40,8 @@ class LMStudioVLM:
             "messages": request.messages,
             "temperature": 0,
             "max_tokens": 4000,
+            # 27b thinking 型：显式压 reasoning（实测 30-80s → 7.3s，读值仍正确）
+            "reasoning_effort": "low",
         }
         if request.tools:
             payload["tools"] = request.tools

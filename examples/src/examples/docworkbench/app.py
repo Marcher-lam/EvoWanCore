@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 from agent_core.capability import CapabilityDescriptor, CapabilityType, InMemoryCapabilityRegistry
@@ -372,7 +373,18 @@ class DocumentAgentApp:
             event_log=self._event_log,
         )
         try:
+            seen_claims: set[str] = set()
             for r in pending:
+                # v4 压缩：预门审计否决（claim 机器审计必错的候选不付 10 次 solve 的
+                # 门费——发布位否决的语义前移，红线不变）+ 声明去重
+                if not statement_matches_truth(r.content):
+                    continue
+                claim_key = json.dumps(
+                    (r.content.get("claim") or {}), sort_keys=True, ensure_ascii=False
+                )
+                if claim_key in seen_claims:
+                    continue
+                seen_claims.add(claim_key)
                 dimension = r.source_refs[0].split("_", 1)[0] if r.source_refs else ""
                 # T23：优先按 claim.action 定向验证场（convert 规则在 export/extract 陷阱上
                 # 才有区分度；LLM 自报 dimension 常错标为 convert）
@@ -418,7 +430,7 @@ class DocumentAgentApp:
                 # T31-C 红线否决：claim 机器审计不过（反真值/不可判）不发布——
                 # 错误晋级率=0 优先于泛化发布路径（eval 门仍是主门，此处仅拦
                 # 审计必错的 claim；见台账 Ruling）
-                if not audit_ok:
+                if not audit_ok:  # 预门已过滤；此处纵深防御（正常不可达）
                     continue
                 await self._publisher.publish(
                     r.id,

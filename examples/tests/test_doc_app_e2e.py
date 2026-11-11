@@ -337,8 +337,9 @@ async def test_gate_rejects_wrong_rule_via_eval(tmp_path: Path, corpus) -> None:
 
     rules = await app._memory_store.query("rules", {})  # noqa: SLF001
     assert rules and rules[0].verification.value == "candidate", "评测门未过须保持 CANDIDATE"
-    # 门确实运行过（对比臂产生了真实 solve 调用，而非旧真值门短路）
-    assert len(fake.recorded_requests) > 10, "评测门应执行父子对比 solve"
+    # v4 压缩后语义：claim 机器审计必错的候选被预门否决——不付 10 次 solve 门费
+    # （发布位否决语义前移，红线不变）。断言门未跑对比 solve（模型调用止于练习）。
+    assert len(fake.recorded_requests) <= 3, "垃圾声明不得消耗门评测调用"
 
 
 async def test_gate_never_uses_heldout(tmp_path: Path, corpus) -> None:
