@@ -1,4 +1,8 @@
-"""T22 文档 Agent 应用端到端：冷启动失败 → 探索沉淀记忆 → 同类任务通过。"""
+"""T22 文档 Agent 应用端到端：冷启动失败 → 探索沉淀记忆 → 同类任务通过。
+
+命名说明：FakeModelAdapter 是"脚本化 model"（按序弹响应），不是 mock 网络——
+对 gateway 的每次 infer 都真实走适配器代码路径。
+"""
 
 import json
 from pathlib import Path

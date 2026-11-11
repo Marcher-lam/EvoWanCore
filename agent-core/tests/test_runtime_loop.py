@@ -648,3 +648,42 @@ async def test_cancel_state_survives_during_active_run(tmp_path: Path) -> None:
     run = await submit_task
     assert run.state.value == "cancelled"
     assert run_id not in env.runtime._cancelled  # noqa: SLF001 — 终态后清理
+
+
+async def test_checkpoint_excludes_image_b64(tmp_path: Path) -> None:
+    """T10 minor：vision 任务的 checkpoint 不序列化 image_url base64（膨胀修复）。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[
+            InferResponse(tool_calls=[{"id": "c1", "name": "extract_fields",
+                                       "arguments": {}}]),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    big_b64 = "data:image/png;base64," + "VERYLONGBASE64DATA" * 100
+    vision = TaskSpec(
+        id="spec_vision_lean", kind="wb:extract",
+        goal={"what": "读图", "doc_id": "doc_9"}, input_schema={},
+        constraints={"vision": True, "image_url": big_b64},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    from agent_core.run import RunHandle, RunState
+
+    run = RunHandle(task_id="t", agent_id="a", state=RunState.RUNNING)
+    await env.runtime._save_checkpoint(run, {  # noqa: SLF001 — 序列化单元路径
+        "task": vision, "pending": [], "history": []
+    })
+    cp = await env.state_store.load_latest_checkpoint(run.id)
+    assert cp is not None
+    blob = json.dumps(cp, default=str)
+    assert "VERYLONGBASE64DATA" not in blob, "checkpoint 不得携带 base64 图"
+    assert cp.get("task", {}).get("constraints", {}).get("vision") is True, (
+        "vision 标记保留（resume 语义重建依据）"
+    )
+    assert cp.get("task", {}).get("constraints", {}).get("image_doc_id") == "doc_9", (
+        "图引用以 doc_id 保留（重建锚点）"
+    )

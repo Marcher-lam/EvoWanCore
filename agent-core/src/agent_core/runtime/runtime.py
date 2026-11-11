@@ -138,9 +138,23 @@ class AgentRuntime:
     async def _save_checkpoint(
         self, run: RunHandle, context: dict, extra: dict | None = None
     ) -> None:
-        """检查点持久化 context 子集（task spec + pending + history）——resume 重建依据。"""
+        """检查点持久化 context 子集（task spec + pending + history）——resume 重建依据。
+
+        T10 minor：序列化前剔除 image_url 大字段（base64 图每次动作写 3 份进
+        append-only checkpoints 表）——存 vision 标记 + image_doc_id 引用，
+        resume 侧按约束语义重建（重建实现属 T10 的 resume 钩子，见下）。
+        """
+        task_dump = context["task"].model_dump()
+        constraints = task_dump.get("constraints") or {}
+        if constraints.get("vision"):
+            image_url = constraints.pop("image_url", None)
+            if image_url and "image_doc_id" not in constraints:
+                constraints["image_doc_id"] = str(
+                    context["task"].goal.get("doc_id", "")
+                )
+            task_dump["constraints"] = constraints
         state: dict = {
-            "task": context["task"].model_dump(),
+            "task": task_dump,
             "pending": list(context["pending"]),
             "history": list(context["history"]),
         }
@@ -375,6 +389,15 @@ class AgentRuntime:
         # T6：重建 context（task 子集 + history 来自检查点）继续主循环，而非仅对账收口
         task_payload = checkpoint.get("task")
         if task_payload:
+            constraints = task_payload.get("constraints") or {}
+            if constraints.get("vision") and not constraints.get("image_url"):
+                # T10 minor：checkpoint 只存 image_doc_id——重建需注入方提供 image_urls
+                # （app.explore 的 app_context）；无映射时保留标记（后续路由按 vision 走）
+                image_urls = checkpoint.get("image_urls") or {}
+                doc_ref = constraints.get("image_doc_id", "")
+                if doc_ref and doc_ref in image_urls:
+                    constraints["image_url"] = image_urls[doc_ref]
+                task_payload["constraints"] = constraints
             task = TaskSpec(**task_payload)
         else:
             handle = await self._store.load_task(run.task_id)
