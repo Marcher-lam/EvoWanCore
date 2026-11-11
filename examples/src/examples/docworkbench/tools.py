@@ -98,11 +98,20 @@ def _normalize_value(value):
     return value
 
 
-def submit_extracted_fields(doc_id: str, fields: dict) -> dict:
+def submit_extracted_fields(doc_id: str, fields: dict | str) -> dict:
     """交付抽取结果（T18）：模型读图后提交；交付载荷进证据链，由验收对照真值判分。
 
-    字段值经 _normalize_value 归一（真 VLM 复跑前置：字符串数字→int）。
+    字段值经 _normalize_value 归一（字符串数字→int）；fields 为 JSON 字符串时
+    先解析（27b 真模型实测常把 dict 序列化成 str 传入，曾致 handler 连环
+    ValueError → run 空转 23 次提议）。
     """
+    import json as _json
+
+    if isinstance(fields, str):
+        try:
+            fields = _json.loads(fields)
+        except ValueError:
+            fields = {}
     normalized = {k: _normalize_value(v) for k, v in dict(fields).items()}
     return {"doc_id": doc_id, "fields": normalized, "source": "image_read"}
 
@@ -117,9 +126,12 @@ def convert_format(doc: dict, dpi: int = 200) -> dict:
         return {**doc, "fields": kept, "lossy": True, "dpi": dpi}
     if dpi >= _REQUIRED_DPI:
         pages = [{**p, "contrast": 1.0} for p in doc["pages"]]
+        render_scale = 2  # 真 VLM OCR 精度（27b 探针：低对比 1x 首位数字错，2x 全对）
     else:
         pages = doc["pages"]
+        render_scale = 1
     return {**doc, "pages": pages, "lossy": False, "dpi": dpi,
+            "render_scale": render_scale,
             "export_ready": dpi >= _SAFE_EXPORT_DPI}
 
 

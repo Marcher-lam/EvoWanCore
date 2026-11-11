@@ -250,3 +250,17 @@ def test_render_shows_all_fields() -> None:
     if len(doc["fields"]) > 6:
         only6 = _render_png({**doc, "fields": doc["fields"][:6]})
         assert full != only6, "第 7+ 字段必须被渲染（截断 bug 修复）"
+
+
+def test_convert_upscales_render() -> None:
+    """v4 诊断迭代：convert_format 产出派生文档携带 2x 渲染 PNG（真值不变）——
+    感知约束语义升级：convert 同时提升对比度与分辨率（27b 探针：低对比 1x 首位
+    数字读错，2x 全对 8/8）。"""
+    from examples.docworkbench.tools import convert_format
+
+    corpus = generate_corpus(seed=42, size=8, difficulty=0.8, perceptual=True)
+    doc = next(d for d in corpus.documents if d["kind"] == "scan")
+    converted = convert_format(doc, dpi=200)
+    assert converted.get("render_scale") == 2, "convert 后渲染倍率 2x"
+    # 真值不因 upscale 改变
+    assert [f["value"] for f in converted["fields"]] == [f["value"] for f in doc["fields"]]

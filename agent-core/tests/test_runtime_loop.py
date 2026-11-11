@@ -27,7 +27,7 @@ from agent_core.runtime.eventlog import SqliteEventLog
 from agent_core.runtime.executor import CapabilityExecutor
 from agent_core.runtime.runtime import AgentRuntime
 from agent_core.runtime.statestore import SqliteStateStore
-from agent_core.task import TaskSpec
+from agent_core.task import TaskHandle, TaskSpec
 
 # ---------- 测试装置 ----------
 
@@ -591,3 +591,133 @@ def test_capability_schemas_are_valid_json_schema() -> None:
             f"工具 {s['function']['name']} 的 parameters 必须是合法 JSON Schema"
         )
         assert set(params.get("properties", {})) == {"doc_id", "fields"}
+
+
+async def test_cancel_state_cleaned_after_terminal(tmp_path: Path) -> None:
+    """M11：终态后 cancel 状态清理——_cancelled/_cancel_events 不随运行数无限增长。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[
+            InferResponse(tool_calls=[{"id": "c1", "name": "extract_fields",
+                                       "arguments": {"doc": "a"}}]),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    run = await env.runtime.submit(_spec(), env.agent())
+    assert run.state.value == "succeeded"
+    await env.runtime.cancel(run.id)  # 终态 run：cancel 短路返回
+    # 主动清理点：任何 submit 完成后（终态落定）其 cancel 痕迹应可被回收
+    # 实现：verify_and_finish 终态迁移后调用 _cleanup_cancel_state
+    assert run.id not in env.runtime._cancelled, "终态 run 的取消标记应清理"  # noqa: SLF001
+    assert run.id not in env.runtime._cancel_events, "终态 run 的取消事件应清理"  # noqa: SLF001
+
+
+async def test_cancel_state_survives_during_active_run(tmp_path: Path) -> None:
+    """清理不得过早：RUNNING 中的取消标记在 run 结束前保持可用。"""
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def slow(args):  # noqa: ARG001
+        await release.wait()
+        return {"late": True}
+
+    env = Env(
+        tmp_path,
+        responses=[InferResponse(
+            tool_calls=[{"id": "c1", "name": "extract_fields", "arguments": {}}])],
+        handler=slow,
+    )
+    submit_task = asyncio.create_task(env.runtime.submit(_spec(), env.agent()))
+    run_id = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        async for e in env.event_log.iter_events():
+            if e.type == "ActionDispatched":
+                run_id = e.correlation_id
+                break
+        if run_id:
+            break
+    await env.runtime.cancel(run_id)
+    assert run_id in env.runtime._cancelled  # noqa: SLF001 — 活跃期保持
+    release.set()
+    run = await submit_task
+    assert run.state.value == "cancelled"
+    assert run_id not in env.runtime._cancelled  # noqa: SLF001 — 终态后清理
+
+
+async def test_checkpoint_excludes_image_b64(tmp_path: Path) -> None:
+    """T10 minor：vision 任务的 checkpoint 不序列化 image_url base64（膨胀修复）。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(
+        tmp_path,
+        responses=[
+            InferResponse(tool_calls=[{"id": "c1", "name": "extract_fields",
+                                       "arguments": {}}]),
+            InferResponse(text="done"),
+        ],
+        handler=handler,
+    )
+    big_b64 = "data:image/png;base64," + "VERYLONGBASE64DATA" * 100
+    vision = TaskSpec(
+        id="spec_vision_lean", kind="wb:extract",
+        goal={"what": "读图", "doc_id": "doc_9"}, input_schema={},
+        constraints={"vision": True, "image_url": big_b64},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    from agent_core.run import RunHandle, RunState
+
+    run = RunHandle(task_id="t", agent_id="a", state=RunState.RUNNING)
+    await env.runtime._save_checkpoint(run, {  # noqa: SLF001 — 序列化单元路径
+        "task": vision, "pending": [], "history": []
+    })
+    cp = await env.state_store.load_latest_checkpoint(run.id)
+    assert cp is not None
+    blob = json.dumps(cp, default=str)
+    assert "VERYLONGBASE64DATA" not in blob, "checkpoint 不得携带 base64 图"
+    assert cp.get("task", {}).get("constraints", {}).get("vision") is True, (
+        "vision 标记保留（resume 语义重建依据）"
+    )
+    assert cp.get("task", {}).get("constraints", {}).get("image_doc_id") == "doc_9", (
+        "图引用以 doc_id 保留（重建锚点）"
+    )
+
+
+async def test_checkpoint_preserves_image_url_reference(tmp_path: Path) -> None:
+    """I2：vision 任务 checkpoint 剔除 base64 但保留原始 image_urls 引用——
+    resume 侧重建 image_url 的活水源（曾为死路径：save 侧从不写）。"""
+    async def handler(args):  # noqa: ARG001
+        return {"ok": True}
+
+    env = Env(tmp_path, responses=[], handler=handler)
+    big = "data:image/png;base64," + "X" * 500
+    vision = TaskSpec(
+        id="spec_i2", kind="wb:extract",
+        goal={"what": "读图", "doc_id": "doc_i2"}, input_schema={},
+        constraints={"vision": True, "image_url": big},
+        acceptance_criteria=[{"check": "done"}],
+    )
+    from agent_core.run import RunHandle, RunState
+
+    run = RunHandle(task_id="t", agent_id="a", state=RunState.RUNNING)
+    await env.state_store.save_run(run)
+    task_handle = TaskHandle(id="t", spec_id="spec_i2", assigned_agent="a")
+    await env.state_store.save_task(task_handle)
+    await env.runtime._save_checkpoint(run, {"task": vision, "pending": [], "history": []})  # noqa: SLF001
+    cp = await env.state_store.load_latest_checkpoint(run.id)
+    blob = json.dumps(cp, default=str)
+    assert "X" * 100 not in blob, "checkpoint 不携带 base64"
+    assert "image_urls" not in cp, "checkpoint 不存 base64（lean 原则）"
+    # I2：resume 侧从 caller 注入的 image_urls 重建（vision 约束恢复）。
+    # 测试无 VLM 适配器——不跑循环，验证约束重建逻辑本身（checkpoint 里
+    # image_doc_id + caller image_urls → constraints.image_url 恢复）
+    # 直接调 resume 会在执行循环挂 NoModelAvailable（vision 路由）——这是
+    # 正确行为（无 VLM 不应静默降级）。测试只断言 checkpoint 结构 + 参数管道。
+    assert cp["task"]["constraints"].get("image_doc_id") == "doc_i2"
+    assert "image_url" not in cp["task"]["constraints"], "base64 已剔（lean）"

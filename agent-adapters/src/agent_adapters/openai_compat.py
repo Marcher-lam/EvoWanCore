@@ -19,7 +19,10 @@ _FORMAT_NONE = "none"
 class OpenAICompatAdapter:
     def __init__(self, *, base_url: str, api_key: str, capabilities: ModelCapabilities) -> None:
         self._caps = capabilities
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # 长反思/课程调用（真模型）偶发读超时——600s + 1 次重试（v4 实验曾因此全崩）
+        self._client = AsyncOpenAI(
+            base_url=base_url, api_key=api_key, timeout=600.0, max_retries=2
+        )
         self._format_mode: str | None = None  # None = 未探测
 
     def capabilities(self) -> ModelCapabilities:
@@ -43,6 +46,8 @@ class OpenAICompatAdapter:
         }
         if request.tools:
             kwargs["tools"] = request.tools
+        if request.max_tokens is not None:
+            kwargs["max_tokens"] = request.max_tokens
 
         if request.structured_output:
             resp = await self._infer_structured(request, kwargs)

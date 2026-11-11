@@ -138,9 +138,23 @@ class AgentRuntime:
     async def _save_checkpoint(
         self, run: RunHandle, context: dict, extra: dict | None = None
     ) -> None:
-        """检查点持久化 context 子集（task spec + pending + history）——resume 重建依据。"""
+        """检查点持久化 context 子集（task spec + pending + history）——resume 重建依据。
+
+        T10 minor：序列化前剔除 image_url 大字段（base64 图每次动作写 3 份进
+        append-only checkpoints 表）——存 vision 标记 + image_doc_id 引用，
+        resume 侧按约束语义重建（重建实现属 T10 的 resume 钩子，见下）。
+        """
+        task_dump = context["task"].model_dump()
+        constraints = task_dump.get("constraints") or {}
+        if constraints.get("vision"):
+            image_url = constraints.pop("image_url", None)
+            if image_url and "image_doc_id" not in constraints:
+                constraints["image_doc_id"] = str(
+                    context["task"].goal.get("doc_id", "")
+                )
+            task_dump["constraints"] = constraints
         state: dict = {
-            "task": context["task"].model_dump(),
+            "task": task_dump,
             "pending": list(context["pending"]),
             "history": list(context["history"]),
         }
@@ -325,6 +339,11 @@ class AgentRuntime:
 
     # ---------- 取消 / 恢复 / 验证 ----------
 
+    def _cleanup_cancel_state(self, run_id: str) -> None:
+        """M11：终态后清 cancel 痕迹——字典缓慢泄漏修复。"""
+        self._cancelled.discard(run_id)
+        self._cancel_events.pop(run_id, None)
+
     async def cancel(self, run_id: str) -> None:
         run = await self._store.load_run(run_id)
         if run is None or run.state in {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}:
@@ -345,7 +364,9 @@ class AgentRuntime:
     async def _load(self, run_id: str) -> RunHandle:
         return await self._store.load_run(run_id)
 
-    async def resume(self, run_id: str) -> RunHandle:
+    async def resume(
+        self, run_id: str, *, image_urls: dict[str, str] | None = None
+    ) -> RunHandle:
         run = await self._store.load_run(run_id)
         if run is None:
             raise KeyError(f"run {run_id} 不存在")
@@ -370,6 +391,15 @@ class AgentRuntime:
         # T6：重建 context（task 子集 + history 来自检查点）继续主循环，而非仅对账收口
         task_payload = checkpoint.get("task")
         if task_payload:
+            constraints = task_payload.get("constraints") or {}
+            if constraints.get("vision") and not constraints.get("image_url"):
+                # I2：checkpoint 只存 image_doc_id——resume 须由 caller 传入
+                # image_urls（caller 持有 corpus/assets）；无映射保留标记降级
+                image_urls = image_urls or {}
+                doc_ref = constraints.get("image_doc_id", "")
+                if doc_ref and doc_ref in image_urls:
+                    constraints["image_url"] = image_urls[doc_ref]
+                task_payload["constraints"] = constraints
             task = TaskSpec(**task_payload)
         else:
             handle = await self._store.load_task(run.task_id)
@@ -398,11 +428,14 @@ class AgentRuntime:
         if run is None:
             raise KeyError(f"run {run_id} 不存在")
         if run.state in {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}:
+            self._cleanup_cancel_state(run_id)
             return run
         if run.state is RunState.CANCELLING:
             old = run.state
             run = run_transition(run, RunState.CANCELLED)
-            return await self._save(run, old, run.state)
+            result = await self._save(run, old, run.state)
+            self._cleanup_cancel_state(run_id)
+            return result
 
         task = await self._store.load_task(run.task_id)
         evidence_refs: list[str] = []
@@ -415,8 +448,11 @@ class AgentRuntime:
         if run.state is RunState.CANCELLING:
             old = run.state
             run = run_transition(run, RunState.CANCELLED)
-            return await self._save(run, old, run.state)
+            result = await self._save(run, old, run.state)
+            self._cleanup_cancel_state(run_id)
+            return result
         if run.state is RunState.CANCELLED:
+            self._cleanup_cancel_state(run_id)
             return run
         old = run.state
         target = RunState.SUCCEEDED if result.passed else RunState.FAILED
@@ -426,4 +462,5 @@ class AgentRuntime:
             run,
             new_event("RunVerified", "run", run.id, passed=result.passed, checks=result.checks),
         )
+        self._cleanup_cancel_state(run_id)
         return run

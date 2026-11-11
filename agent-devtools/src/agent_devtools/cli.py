@@ -24,6 +24,8 @@ def run_experiment(config: str, out: str) -> None:
     from examples.docworkbench.generator import generate_corpus
 
     raw = json.loads(Path(config).read_text())
+    if not raw.get("seeds"):
+        click.echo("提示：seeds 为空——将只跑种子 1（默认）")
     max_calls = raw.get("max_tokens")  # C1：真实调用计数预算（W 口径，可选）
     cfg = ExperimentConfig(
         seeds=raw.get("seeds", [1]),
