@@ -40,6 +40,7 @@ class InferRequest(BaseModel):
     tools: list[dict] | None = None
     structured_output: dict | None = None
     modalities: list[Modality] = [Modality.TEXT]
+    max_tokens: int | None = None  # None=供应商默认；长代码产出（技能反思）需显式给足
 
 
 class InferResponse(BaseModel):

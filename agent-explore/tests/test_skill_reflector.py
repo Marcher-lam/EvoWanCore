@@ -116,3 +116,60 @@ async def test_skill_reflector_empty_entrypoint_rejected() -> None:
     ])
     reflector = SkillReflector(gateway=gw, model_id="m-sr")
     assert await reflector(_Task(), _Outcome()) is None
+
+
+async def test_type_deviation_triggers_retry() -> None:
+    """真模型缺陷（DeepSeek 实测）：expected_outputs 给 list、failure_scenarios 给
+    字符串——校验必须在反思循环内按 SkillArtifact 实模校验并触发重试，而不是
+    漏到 materialize() 运行时才炸。"""
+    bad = json.loads(_valid_candidate_json())["skill"]
+    bad["expected_outputs"] = [{"args": {"dpi": 150}}]  # list 而非 dict
+    bad["known_failure_scenarios"] = ["dpi< 150"]  # 字符串而非 dict
+    good = json.loads(_valid_candidate_json())
+    gw, fake = _gateway([
+        InferResponse(text=json.dumps({"skill": bad})),
+        InferResponse(text=json.dumps(good)),
+    ])
+    reflector = SkillReflector(gateway=gw, model_id="m-sr")
+    candidate = await reflector(_Task(), _Outcome())
+    assert candidate is not None, "类型偏差第一轮 → 带错误重试 → 第二轮合法 → 产出"
+    assert len(fake.recorded_requests) == 2
+    candidate.materialize()  # 不再运行时炸
+
+
+async def test_contract_failure_triggers_revision(tmp_path) -> None:
+    """L2 换法：契约实测进反思循环——round1 契约挂（声明 200 实产 72）→ 喂实测
+    错误修订 → round2 契约过 → 产出（门降级为纵深防御）。"""
+    from agent_evolve.skill_sandbox import SkillSandbox
+
+    def _candidate(floor: int) -> dict:
+        return json.dumps({"skill": {
+            "skill_id": "lossless_convert", "version": "0.2.0",
+            "description": "d", "entrypoint": "main.py",
+            "expected_outputs": {"ok": {"args": {"dpi": 200},
+                                        "expect_stdout_contains": '"dpi": 200'}},
+            "known_failure_scenarios": [],
+            "script_files": {"main.py": (
+                "import json, sys\n"
+                "args = json.loads(sys.argv[1])\n"
+                f"dpi = min(int(args.get('dpi', 72)), {floor})\n"
+                "print(json.dumps({'dpi': dpi}))\n")},
+        }})
+
+    gw, fake = _gateway([
+        InferResponse(text=_candidate(72)),   # 契约挂：实产 72
+        InferResponse(text=_candidate(200)),  # 修订：实产 200
+    ])
+    sandbox = SkillSandbox(tmp_path / "ws")
+    reflector = SkillReflector(gateway=gw, model_id="m-sr", sandbox=sandbox)
+
+    candidate = await reflector(_Task(), _Outcome())
+    assert candidate is not None, "契约失败应触发修订而非直接放弃"
+    art = candidate.materialize()
+    report = await sandbox.contract_test(art)
+    assert report.passed, "返回的候选必须契约已验证"
+    assert len(fake.recorded_requests) == 2
+    # 修订请求携带实测错误（round2 提示含失败原因）
+    assert "72" in fake.recorded_requests[1].messages[-1]["content"], (
+        "修订提示须携带实测 stdout（真模型据此定位）"
+    )

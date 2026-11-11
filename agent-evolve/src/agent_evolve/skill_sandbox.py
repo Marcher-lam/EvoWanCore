@@ -20,6 +20,13 @@ from pydantic import BaseModel
 
 MAX_STDOUT_BYTES = 1024 * 1024
 
+
+def _expect_all(expectation: str | list[str], text: str) -> bool:
+    """契约子串断言：str=list 的单元素；list=全部子串都须命中（真模型常给列表）。"""
+    if isinstance(expectation, str):
+        return expectation in text
+    return all(e in text for e in expectation)
+
 # A#1：macOS sandbox-exec 网络 deny profile——其余默认放行，仅网络全拒
 _NETWORK_DENY_PROFILE = "(version 1)(allow default)(deny network*)"
 
@@ -194,7 +201,7 @@ class SkillSandbox:
             result = await self.run(artifact, spec.get("args", {}), timeout_s=timeout_s)
             ok = result.status == "succeeded"
             if ok and "expect_stdout_contains" in spec:
-                ok = spec["expect_stdout_contains"] in result.stdout
+                ok = _expect_all(spec["expect_stdout_contains"], result.stdout)
             cases.append(
                 {"name": name, "kind": "expected_output", "ok": ok, "status": result.status}
             )
@@ -205,7 +212,7 @@ class SkillSandbox:
             expect_failed = scenario.get("expect_failed", True)
             ok = (result.status == "failed") == expect_failed
             if ok and "expect_stderr_contains" in scenario:
-                ok = scenario["expect_stderr_contains"] in result.stderr
+                ok = _expect_all(scenario["expect_stderr_contains"], result.stderr)
             cases.append(
                 {"name": name, "kind": "failure_scenario", "ok": ok, "status": result.status}
             )

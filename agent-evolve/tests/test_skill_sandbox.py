@@ -217,3 +217,26 @@ async def test_unsupported_platform_raises(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("sys.platform", "win32")
     with pytest.raises(ValueError, match="网络隔离"):
         SkillSandbox(tmp_path / "ws_x", network="deny")
+
+
+async def test_contract_accepts_substring_lists(tmp_path) -> None:
+    """真模型缺陷（DeepSeek 实测）：expect_stdout_contains 声明成 list——契约消费端
+    须接受 str | list[str]（列表=全部子串都须命中）。"""
+    from agent_evolve.skill_sandbox import SkillArtifact, SkillSandbox
+
+    sandbox = SkillSandbox(tmp_path / "ws")
+    artifact = SkillArtifact(
+        skill_id="s_list", version="1", entrypoint="main.py",
+        expected_outputs={
+            "ok": {"args": {}, "expect_stdout_contains": ["lossless", '"dpi": 150']},
+        },
+        script_files={"main.py": (
+            "import json\nprint(json.dumps({'lossless': True, 'dpi': 150}))\n")},
+    )
+    report = await sandbox.contract_test(artifact)
+    assert report.passed, "列表声明（全命中）应通过"
+
+    partial = artifact.model_copy(deep=True)
+    partial.expected_outputs["ok"]["expect_stdout_contains"] = ["lossless", "absent-substring"]
+    report2 = await sandbox.contract_test(partial)
+    assert not report2.passed, "列表任一未命中 → 挂"

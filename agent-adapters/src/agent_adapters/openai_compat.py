@@ -43,6 +43,8 @@ class OpenAICompatAdapter:
         }
         if request.tools:
             kwargs["tools"] = request.tools
+        if request.max_tokens is not None:
+            kwargs["max_tokens"] = request.max_tokens
 
         if request.structured_output:
             resp = await self._infer_structured(request, kwargs)
