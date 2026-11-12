@@ -77,7 +77,6 @@ async def test_skill_rollback_rf4(tmp_path: Path) -> None:
     assert result.output["dpi"] == 150, "回滚后 dispatch 命中 v1（floor=150）"
 
 
-@pytest.mark.xfail(strict=True, reason="round8: DGM doc-level claim 泛化边界，V4 修复")
 def test_v4_north_star_thresholds() -> None:
     """RF#1+5：v4 报告自动判定——explore extract ≥ 0.67、红线 0、comparable（调用计数）。"""
     report_path = Path("reports/exp_v4.json")

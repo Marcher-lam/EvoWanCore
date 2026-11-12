@@ -81,8 +81,19 @@ class TokenBudgetAssembler:
     @staticmethod
     def _render(record: MemoryRecord) -> str:
         statement = record.content.get("statement", str(record.content))
-        claim_action = (record.content.get("claim") or {}).get("action")
+        claim = record.content.get("claim") or {}
+        claim_action = claim.get("action")
         claim_tag = f"|claim:{claim_action}" if claim_action else ""
+        # 祈使式渲染：真 VLM 对"BEFORE...MUST"遵循率远高于描述式陈述
+        # （v5 实测：27b 读到描述式记忆不执行 convert——多步前置遵循率低）
+        params = claim.get("params") or {}
+        param_str = ", ".join(f"{k}={v}" for k, v in params.items() if k != "doc_id")
+        if claim_action and param_str:
+            imperative = f"MANDATORY: call {claim_action}({param_str}) BEFORE proceeding"
+            return (
+                f"- [{record.kind.value}|{record.verification.value}{claim_tag}] "
+                f"{imperative}. {statement}"
+            )
         return f"- [{record.kind.value}|{record.verification.value}{claim_tag}] {statement}"
 
     def assemble(self, records: list[MemoryRecord], token_budget: int) -> str:

@@ -52,7 +52,8 @@ async def _infer_validated(gateway: ModelGateway, messages: list[dict], schema_h
     """带校验-重试的 infer（PracticeWave 同款）：畸形输出附错误重试一次，再失败抛错。"""
     request_msgs = list(messages)
     last_error = ""
-    for _attempt in range(2):
+    for _attempt in range(3):  # V4：3 轮（原 2 轮反思成功率 ~1/4，主因是第二轮
+        # 仍 schema 违规；第三轮给更多修正机会）
         adapter = gateway.route({"inputs": [Modality.TEXT]})
         resp = await adapter.infer(
             InferRequest(
@@ -110,7 +111,12 @@ class LLMReflector:
                     '{"dimension": one of export|extract|convert|validate, "action": '
                     'one of the tool names above, "params": the decisive parameter '
                     'values, all CONCRETE (numbers/enums like 200 or "left") — never '
-                    "descriptive text} — plus a human-readable statement. Generic "
+                    "descriptive text} — plus a human-readable statement. "
+                    "CRITICAL: claim.params MUST NOT contain doc_id or any "
+                    "document-specific reference — rules must generalize to ALL "
+                    'documents of that dimension (params={"dpi": 300} is correct; '
+                    'params={"doc_id": "doc_0", "dpi": 300} is WRONG and will be '
+                    "rejected). Generic "
                     "process wisdom (e.g. 'verify afterwards', 'check the format') is "
                     "NOT acceptable. An empty proposals list is acceptable when the "
                     "trace supports no causal rule."
@@ -144,6 +150,11 @@ class LLMReflector:
             )
         except ReflectorError:
             return []
+        # 泛化守门：doc 级 claim 不可过——doc_id 出现在 params 中说明规则
+        # 绑定特定文档，无法迁移到 unseen 保留集（round8 根因修复）
+        proposals = [
+            p for p in parsed.proposals if "doc_id" not in (p.claim.get("params") or {})
+        ]
         return [
             {
                 "kind": "rule",
@@ -151,5 +162,5 @@ class LLMReflector:
                 "applicability": p.applicability,
                 "evidence_refs": list(outcome.evidence_refs),  # 白名单：仅 outcome 的证据
             }
-            for p in parsed.proposals
+            for p in proposals
         ]

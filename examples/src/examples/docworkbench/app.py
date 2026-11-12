@@ -57,8 +57,16 @@ class _LazyImageUrls:
 
 
 class WorkbenchLoopPolicy(ModelLoopPolicy):
-    """v4 压缩：交付工具成功即转验证（真 VLM 每次提议 30-80s，空转到 max_steps
-    是实验时间黑洞——run1 实测均 7.1 次提议/任务）。"""
+    """v4 压缩：交付工具成功即转验证 + convert 后视觉更新（真 VLM 读派生 2x 图）。
+
+    v6 关键发现：27b 执行 convert 后，TaskSpec constraints 的 image_url 仍是
+    原始 1x 图——模型"逻辑上"转换了但"视觉上"看的还是旧图。此策略在每次
+    propose 前检测 convert 成功 → 把 image_url 切换为派生 2x PNG。
+    """
+
+    def __init__(self, *, gateway, agent, app=None):
+        super().__init__(gateway=gateway, agent=agent)
+        self._app = app  # 弱引用 app（访问 _derived 与 _corpus.assets）
 
     def should_yield(self, run, context) -> bool:  # noqa: ARG002
         task = context.get("task")
@@ -72,6 +80,45 @@ class WorkbenchLoopPolicy(ModelLoopPolicy):
             h.get("capability_id") == wanted and h.get("status") == "succeeded"
             for h in context.get("history", [])
         )
+
+    async def propose_next_actions(self, run, context):
+        # 视觉更新：convert 成功后，image_url 切换为派生 2x PNG
+        constraints = getattr(context.get("task"), "constraints", None) or {}
+        if constraints.get("vision") and self._app is not None:
+            doc_id = str(context["task"].goal.get("doc_id", ""))
+            has_convert = any(
+                h.get("capability_id") == "convert_format"
+                and h.get("status") == "succeeded"
+                for h in context.get("history", [])
+            )
+            if has_convert and doc_id:
+                import base64 as _b64
+                import io
+
+                from PIL import Image
+
+                derived = self._app._derived.get(doc_id)  # noqa: SLF001
+                scale = (derived or {}).get("render_scale", 1) if derived else 1
+                if scale > 1:
+                    png = self._app._corpus.assets.get(doc_id, b"")  # noqa: SLF001
+                    if png:
+                        img = Image.open(io.BytesIO(png))
+                        big = img.resize(
+                            (img.width * scale, img.height * scale), Image.LANCZOS
+                        )
+                        buf = io.BytesIO()
+                        big.save(buf, format="PNG")
+                        new_url = (
+                            f"data:image/png;base64,"
+                            f"{_b64.b64encode(buf.getvalue()).decode()}"
+                        )
+                        if constraints.get("image_url") != new_url:
+                            context["task"] = context["task"].model_copy(
+                                update={"constraints": {
+                                    **constraints, "image_url": new_url
+                                }}
+                            )
+        return await super().propose_next_actions(run, context)
 
 
 class WorkbenchVerifier:
@@ -610,8 +657,10 @@ def build_app(
         memory_retriever=retriever,
         context_assembler=assembler,
         environment_version=ENV_VERSION,
-        execution_policy=WorkbenchLoopPolicy(gateway=gateway, agent=AgentSpec(
-            id="doc_agent", role="document worker", model_id="m-app")),
+        execution_policy=WorkbenchLoopPolicy(
+            gateway=gateway,
+            agent=AgentSpec(id="doc_agent", role="document worker", model_id="m-app"),
+        ),
     )
 
     controller = ExplorationController(
@@ -623,7 +672,7 @@ def build_app(
         gap_ledger=gap_ledger,
     )
 
-    return DocumentAgentApp(
+    app = DocumentAgentApp(
         gateway=gateway,
         registry=registry,
         runtime=runtime,
@@ -641,3 +690,5 @@ def build_app(
         evo_db_path=Path(db_path).with_suffix(".evo.db"),
         reflector=reflector,
     )
+    runtime._execution_policy._app = app  # noqa: SLF001 — 视觉更新需访问 _derived
+    return app

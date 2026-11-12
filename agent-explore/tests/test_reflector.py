@@ -74,14 +74,16 @@ async def test_reflector_structured_output() -> None:
 
 async def test_reflector_malformed_returns_empty() -> None:
     """畸形输出：校验-重试一轮后仍坏 → []（不抛错、不产生候选）。"""
-    gw, fake = _gateway(
-        [InferResponse(text="这不是 JSON"), InferResponse(text="still not json")]
-    )
+    gw, fake = _gateway([
+        InferResponse(text="这不是 JSON"),
+        InferResponse(text="still not json"),
+        InferResponse(text="still bad"),  # V4：3 轮重试（原 2 轮）
+    ])
     reflector = LLMReflector(gateway=gw, model_id="m-r")
 
     proposals = await reflector(_Task(), _Outcome())
     assert proposals == []
-    assert len(fake.recorded_requests) == 2, "畸形应触发一次带错误提示的重试"
+    assert len(fake.recorded_requests) == 3, "畸形应触发带错误提示的重试至 3 轮"
 
 
 class _OutcomeWithTrace:
@@ -164,3 +166,32 @@ async def test_reflector_prompt_demands_concrete_params() -> None:
     await LLMReflector(gateway=gw, model_id="m-r")(_Task(), _OutcomeWithTrace())
     prompt = fake.recorded_requests[0].messages[0]["content"]
     assert "concrete" in prompt.lower(), "提示须要求 params 为具体值"
+
+
+async def test_doc_level_claim_filtered() -> None:
+    """V4 泛化修复：claim params 含 doc_id → 丢弃（round8 根因：doc 级规则
+    不迁移到 unseen heldout doc）。"""
+    import json
+
+    llm_output = {
+        "proposals": [
+            {
+                "statement": "convert doc_0 with dpi 300",
+                "claim": {"dimension": "convert", "action": "convert_format",
+                          "params": {"doc_id": "doc_0", "dpi": 300}},
+                "applicability": {"app": "workbench"},
+            },
+            {
+                "statement": "扫描件转换前须 dpi>=300",
+                "claim": {"dimension": "convert", "action": "convert_format",
+                          "params": {"dpi": 300}},
+                "applicability": {"app": "workbench"},
+            },
+        ]
+    }
+    gw, _fake = _gateway([InferResponse(text=json.dumps(llm_output))])
+    reflector = LLMReflector(gateway=gw, model_id="m-r")
+    proposals = await reflector(_Task(), _OutcomeWithTrace())
+    assert len(proposals) == 1, "doc 级 claim 必须被过滤"
+    assert "doc_id" not in proposals[0]["content"]["claim"]["params"]
+    assert proposals[0]["content"]["claim"]["params"] == {"dpi": 300}
