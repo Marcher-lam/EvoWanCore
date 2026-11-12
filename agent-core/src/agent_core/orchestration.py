@@ -97,6 +97,7 @@ Planner = Callable[[str], Any]  # 同步 str→str 或 async str→str
 
 
 async def _call_planner(planner: Planner, prompt: str) -> str:
+    """调用 planner；异常（网络/超时是真实 LLM 常态）向上抛由调用方 fail-safe 收口。"""
     raw = planner(prompt)
     if inspect.isawaitable(raw):
         raw = await raw
@@ -104,11 +105,27 @@ async def _call_planner(planner: Planner, prompt: str) -> str:
 
 
 def _parse_id_list(raw: str) -> list[str]:
-    """宽容解析 JSON 数组；解析失败 → []（fail-safe：不派任何人）。"""
+    """宽容解析 JSON 数组（容忍 ```json 围栏/前后噪声）；失败 → []。
+
+    fail-safe：不派任何人——非法输入绝不变成错误派发。
+    """
+    text = raw.strip()
+    fence = text.find("```")
+    if fence != -1:  # 剥离 ```json 围栏
+        first_nl = text.find("\n", fence)
+        close = text.rfind("```")
+        if first_nl != -1 and close > first_nl:
+            text = text[first_nl + 1:close].strip()
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return []
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            return []
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return []
     if not isinstance(parsed, list):
         return []
     return [x for x in parsed if isinstance(x, str)]
@@ -118,8 +135,9 @@ class LLMCompositionPolicy:
     """LLM 动态调度：planner 可为同步/异步可调用（FakeModel 或网关桥皆可）。
 
     红线：planner 输出必须过白名单校验——
-    - 选人：只保留已知 agent id（幻觉/注入 id 丢弃；全无效 → 空）
-    - 终止：只认 "continue"；其他任何输出 → "terminate"（fail-safe 停止）
+    - 选人：只保留已知 agent id（幻觉/注入 id 丢弃；全无效 → 空）+ 保序去重
+    - 终止：精确匹配 "continue"（含引号容忍）；其他任何输出 → "terminate"
+    - planner 异常：选人 → 空、终止 → terminate（fail-safe，不炸整个编排）
     """
 
     def __init__(self, planner: Planner) -> None:
@@ -128,7 +146,7 @@ class LLMCompositionPolicy:
     async def select_participants(
         self, task: Any, agents: list[Any], context: dict | None = None
     ) -> list[str]:
-        known = [a.id for a in agents]
+        known = {a.id for a in agents}
         prompt = (
             f"任务 kind={getattr(task, 'kind', '')} goal={getattr(task, 'goal', {})}\n"
             f"候选 agents: "
@@ -136,9 +154,12 @@ class LLMCompositionPolicy:
             f"已执行轮次摘要: {json.dumps(context or {}, ensure_ascii=False, default=str)}\n"
             "只输出 JSON 数组（要派发的 agent id），不要其他文字。"
         )
-        raw = await _call_planner(self._planner, prompt)
-        requested = _parse_id_list(raw)
-        return [i for i in requested if i in known]  # 白名单：幻觉 id 丢弃
+        try:
+            raw = await _call_planner(self._planner, prompt)
+        except Exception:  # noqa: BLE001 — planner 故障 fail-safe 为零派发
+            return []
+        requested = [i for i in _parse_id_list(raw) if i in known]
+        return list(dict.fromkeys(requested))  # 白名单 + 保序去重（防同轮双跑）
 
     async def decide_termination(self, task: Any, context: dict) -> str:
         prompt = (
@@ -146,8 +167,12 @@ class LLMCompositionPolicy:
             f"参与者终态: {json.dumps(context.get('participants', {}), default=str)}\n"
             '输出 "continue"（继续下一轮重规划）或 "terminate"（全部完成/放弃）。'
         )
-        raw = await _call_planner(self._planner, prompt)
-        return "continue" if "continue" in raw.strip().lower() else "terminate"
+        try:
+            raw = await _call_planner(self._planner, prompt)
+        except Exception:  # noqa: BLE001 — planner 故障 fail-safe 终止
+            return "terminate"
+        word = raw.strip().strip('"').strip("'").strip().lower()
+        return "continue" if word == "continue" else "terminate"
 
 
 class StaticPolicyAdapter:
@@ -170,6 +195,8 @@ class ReplanningOrchestrator:
 
     语义：已成功者不重跑；单 agent 异常隔离为 failed；无活可派即收口；
     max_rounds 硬上界防策略死循环。
+    可观测性：orchestrate 返回后 `last_rounds_used`/`last_stopped_by` 可查
+    （"policy" = 策略主动停 / "no_work" = 无活可派 / "max_rounds" = 截断）。
     """
 
     def __init__(
@@ -181,6 +208,8 @@ class ReplanningOrchestrator:
         self._policy = policy
         self._runtimes = runtimes
         self._max_rounds = max_rounds
+        self.last_rounds_used = 0
+        self.last_stopped_by: str = ""
 
     async def orchestrate(
         self, task: TaskSpec, agents: list[Any]
@@ -188,14 +217,19 @@ class ReplanningOrchestrator:
         agent_map = {a.id: a for a in agents}
         states: dict[str, str] = {}
         context: dict = {"participants": states, "rounds": []}
+        self.last_rounds_used = 0
+        self.last_stopped_by = "max_rounds"
 
         for _round in range(self._max_rounds):
             selected = await self._policy.select_participants(task, agents, context)
             todo = [
                 aid for aid in selected
-                if aid in self._runtimes and states.get(aid) != "succeeded"
+                # 双重守卫：有 runtime 且有 agent spec 且未成功
+                if aid in self._runtimes and aid in agent_map
+                and states.get(aid) != "succeeded"
             ]
             if not todo:
+                self.last_stopped_by = "no_work"
                 break  # 无人可派（含：策略只提名已成功者）→ 收口
 
             async def _run_one(agent_id: str) -> tuple[str, str]:
@@ -213,7 +247,9 @@ class ReplanningOrchestrator:
                 states[agent_id] = state
                 round_record[agent_id] = state
             context["rounds"].append(round_record)
+            self.last_rounds_used = _round + 1
 
             if await self._policy.decide_termination(task, context) != "continue":
+                self.last_stopped_by = "policy"
                 break
         return states

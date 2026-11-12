@@ -120,9 +120,12 @@ async def test_v6_sse_stream_e2e(tmp_path: Path) -> None:
     )
 
     def factory():
+        from agent_core.models import ModelGateway
+
         components = base()
-        slow = _Slow()
-        components["runtime"]._gateway.register(slow)  # noqa: SLF001
+        gw = ModelGateway()
+        gw.register(_Slow())  # 独占慢模型（追加注册会被快模型遮蔽路由）
+        components["runtime"]._gateway = gw  # noqa: SLF001
         return components
 
     server = AgentSDKServer(factory, port=18800)
@@ -134,12 +137,35 @@ async def test_v6_sse_stream_e2e(tmp_path: Path) -> None:
                 "acceptance_criteria": [{"check": "done"}],
             }) as resp:
                 run_id = (await resp.json())["run_id"]
-            events, saw_end = await _read_sse(
-                client, f"{server.url}/runs/{run_id}/events/stream"
-            )
+
+            # 增量读流：首事件到达时 run 必须仍在执行（实时性铁证）
+            events: list[dict] = []
+            saw_end = False
+            state_at_first: str | None = None
+            async with client.get(
+                f"{server.url}/runs/{run_id}/events/stream",
+                timeout=ClientTimeout(total=15),
+            ) as stream:
+                async for raw in stream.content:
+                    line = raw.decode().strip()
+                    if line.startswith("data:"):
+                        payload = line[len("data:"):].strip()
+                        if not payload:
+                            continue
+                        events.append(json.loads(payload))
+                        if state_at_first is None:
+                            async with client.get(
+                                f"{server.url}/runs/{run_id}"
+                            ) as r:
+                                state_at_first = (await r.json())["state"]
+                    elif line.startswith("event:") and "end" in line:
+                        saw_end = True
+                        break
             assert saw_end and len(events) >= 3
             types = [e["type"] for e in events]
             assert "RunCreated" in types and "RunVerified" in types
+            assert state_at_first in ("queued", "running"), \
+                f"SSE 未实时推送: 首事件到达时已 {state_at_first}"
     finally:
         await server.stop()
 
@@ -189,8 +215,9 @@ async def test_v6_resume_e2e(tmp_path: Path) -> None:
                 async with client.get(f"{server.url}/runs/{run_id}/events") as r:
                     types = [e["type"] for e in (await r.json())["events"]]
                 if "ActionDispatched" in types:
+                    await asyncio.sleep(0.1)  # 检查点落盘余量
                     break
-            bg = next(iter(server._bg))  # noqa: SLF001 — crash-sim 注入点
+            bg = server._bg[run_id]  # noqa: SLF001 — crash-sim 注入点
             bg.cancel()
             try:
                 await bg
@@ -201,8 +228,15 @@ async def test_v6_resume_e2e(tmp_path: Path) -> None:
             async with client.post(
                 f"{server.url}/runs/{run_id}/resume", json={"image_urls": {}},
             ) as resp:
-                assert resp.status == 200
-                assert (await resp.json())["state"] == "succeeded"
+                assert resp.status == 202
+                assert (await resp.json())["state"] == "resuming"
+            for _ in range(250):
+                async with client.get(f"{server.url}/runs/{run_id}") as r:
+                    if (await r.json())["state"] == "succeeded":
+                        break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("resume 后未到 succeeded")
             async with client.get(f"{server.url}/runs/{run_id}/events") as r:
                 types = [e["type"] for e in (await r.json())["events"]]
             assert "ActionOutcomeUnknown" in types
