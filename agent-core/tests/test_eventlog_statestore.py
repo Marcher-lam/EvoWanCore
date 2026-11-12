@@ -73,3 +73,30 @@ async def test_checkpoint_latest_wins(store: SqliteStateStore) -> None:
     assert latest["step"] == 2
     assert latest["actions_done"] == ["a1", "a2"]
     assert await store.load_latest_checkpoint("run_none") is None
+
+
+# ---------- V7-T2: seq 游标增量读 ----------
+
+async def test_iter_events_with_seq_cursor(tmp_path) -> None:
+    """after_seq 游标只返回其后的同 correlation 事件，跨 run seq 不串。"""
+    from agent_core.events import new_event
+
+    log = SqliteEventLog(tmp_path / "cursor.db")
+    for i in range(3):
+        await log.append(new_event("E", "run", f"r-{i}", i=i, correlation_id="runA"))
+    await log.append(new_event("E", "run", "other", i=99, correlation_id="runB"))
+
+    all_a = [(s, e) async for s, e in log.iter_events_with_seq("runA", -1)]
+    assert len(all_a) == 3, "只含 runA 的 3 条"
+    seqs = [s for s, _ in all_a]
+    assert seqs == sorted(seqs), "seq 有序"
+
+    after_first = [
+        e async for _, e in log.iter_events_with_seq("runA", all_a[0][0])
+    ]
+    assert len(after_first) == 2, "游标后只返回 2 条"
+    assert [e.payload["i"] for e in after_first] == [1, 2]
+
+    # 游标越界（超过全部）→ 空
+    empty = [e async for _, e in log.iter_events_with_seq("runA", seqs[-1])]
+    assert empty == []

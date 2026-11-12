@@ -54,5 +54,9 @@ class OpenAIRealtimeAdapter:
     async def send_text(self, session_id: str, text: str) -> None:
         await self._inner.send_text(session_id, text)
 
+    def stream(self, session_id: str):
+        """透传会话事件流（opened/transcript_*/tool_call/closed/...）。"""
+        return self._inner.stream(session_id)
+
     async def close_session(self, session_id: str) -> None:
         await self._inner.close_session(session_id)

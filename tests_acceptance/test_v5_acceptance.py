@@ -82,7 +82,7 @@ async def test_v5_sdk_http_roundtrip(tmp_path: Path) -> None:
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
-    server = AgentSDKServer(_sdk_app_factory(tmp_path), port=18600)
+    server = AgentSDKServer(_sdk_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -206,11 +206,6 @@ async def test_v5_a2a_end_to_end() -> None:
         InboundA2AHandler,
     )
 
-    registry = AgentRegistry()
-    registry.register("worker", ["extract"], "http://127.0.0.1:18601")
-    found = registry.discover("extract")
-    assert len(found) == 1
-
     async def handler(env: A2AEnvelope):
         return A2AEnvelope(
             from_agent=env.to_agent, to_agent=env.from_agent,
@@ -218,9 +213,14 @@ async def test_v5_a2a_end_to_end() -> None:
             reply_to=env.message_id,
         )
 
-    inbound = InboundA2AHandler(port=18601, handler=handler)
+    inbound = InboundA2AHandler(port=0, handler=handler)
     await inbound.start()
     try:
+        registry = AgentRegistry()
+        registry.register("worker", ["extract"], f"http://127.0.0.1:{inbound.port}")
+        found = registry.discover("extract")
+        assert len(found) == 1
+
         transport = HTTPAgentTransport(found[0]["endpoint"])
         await transport.send(A2AEnvelope(
             from_agent="orchestrator", to_agent="worker",
@@ -255,10 +255,11 @@ async def test_v5_cua_adapter_and_redlines() -> None:
     app.router.add_post("/act", _act)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 18602)
+    site = web.TCPSite(runner, "127.0.0.1", 0)  # 动态端口
     await site.start()
+    env_port = runner.addresses[0][1]
     try:
-        adapter = HTTPEnvironmentAdapter("http://127.0.0.1:18602")
+        adapter = HTTPEnvironmentAdapter(f"http://127.0.0.1:{env_port}")
         obs = await adapter.observe()
         assert "dom" in obs and "screenshot_url" in obs
         assert (await adapter.act({"action": "click", "target": "#x"}))["ok"]

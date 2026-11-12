@@ -65,10 +65,10 @@ async def test_transport_roundtrip(tmp_path: Path) -> None:
             reply_to=envelope.message_id,
         )
 
-    inbound = InboundA2AHandler(port=18400, handler=handler)
+    inbound = InboundA2AHandler(port=0, handler=handler)
     await inbound.start()
     try:
-        transport = HTTPAgentTransport(base_url="http://127.0.0.1:18400")
+        transport = HTTPAgentTransport(base_url=f"http://127.0.0.1:{inbound.port}")
         env = A2AEnvelope(
             from_agent="a1", to_agent="a2",
             message_type="task_request", payload={"x": 1},
@@ -94,10 +94,10 @@ async def test_transport_receive_waits_then_gets_reply(tmp_path: Path) -> None:
             message_type="reply", payload={"late": True},
         )
 
-    inbound = InboundA2AHandler(port=18401, handler=handler)
+    inbound = InboundA2AHandler(port=0, handler=handler)
     await inbound.start()
     try:
-        transport = HTTPAgentTransport(base_url="http://127.0.0.1:18401")
+        transport = HTTPAgentTransport(base_url=f"http://127.0.0.1:{inbound.port}")
         receiver = asyncio.create_task(transport.receive())
         await asyncio.sleep(0.01)  # receiver 先挂起等待
         await transport.send(A2AEnvelope(
@@ -105,5 +105,60 @@ async def test_transport_receive_waits_then_gets_reply(tmp_path: Path) -> None:
         ))
         reply = await asyncio.wait_for(receiver, timeout=5)
         assert reply["payload"] == {"late": True}
+    finally:
+        await inbound.stop()
+
+
+# ---------- V7-T4: 入站 bearer 鉴权 ----------
+
+async def test_a2a_auth_rejects_missing_token() -> None:
+    """设置 auth_token 后：无凭证 → 401；错 token → 401。"""
+    import aiohttp
+
+    async def handler(env: A2AEnvelope) -> None:
+        return None
+
+    inbound = InboundA2AHandler(port=0, handler=handler, auth_token="s3cret")
+    await inbound.start()
+    try:
+        assert inbound.port > 0, "port=0 回读临时端口"
+        async with aiohttp.ClientSession() as client:
+            env = A2AEnvelope(
+                from_agent="a", to_agent="b", message_type="query", payload={},
+            )
+            async with client.post(
+                f"http://127.0.0.1:{inbound.port}/a2a", json=env.model_dump(),
+            ) as resp:
+                assert resp.status == 401
+            async with client.post(
+                f"http://127.0.0.1:{inbound.port}/a2a",
+                json=env.model_dump(),
+                headers={"Authorization": "Bearer wrong"},
+            ) as resp:
+                assert resp.status == 401
+    finally:
+        await inbound.stop()
+
+
+async def test_a2a_auth_roundtrip() -> None:
+    """带正确 token 的 transport ↔ handler 往返不受影响。"""
+
+    async def handler(env: A2AEnvelope) -> A2AEnvelope:
+        return A2AEnvelope(
+            from_agent=env.to_agent, to_agent=env.from_agent,
+            message_type="reply", payload={"ok": True},
+        )
+
+    inbound = InboundA2AHandler(port=0, handler=handler, auth_token="t0ken")
+    await inbound.start()
+    try:
+        transport = HTTPAgentTransport(
+            f"http://127.0.0.1:{inbound.port}", auth_token="t0ken"
+        )
+        await transport.send(A2AEnvelope(
+            from_agent="a", to_agent="b", message_type="query", payload={},
+        ))
+        reply = await asyncio.wait_for(transport.receive(), timeout=5)
+        assert reply["payload"] == {"ok": True}
     finally:
         await inbound.stop()

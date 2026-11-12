@@ -92,7 +92,7 @@ async def _wait_dispatched(client, url: str, run_id: str) -> None:
 async def test_resume_endpoint_e2e(tmp_path: Path) -> None:
     """crash-sim（杀后台任务）→ POST resume(202) → 轮询 succeeded + 对账事件。"""
     block = asyncio.Event()
-    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=18710)
+    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -139,7 +139,7 @@ async def test_resume_endpoint_e2e(tmp_path: Path) -> None:
 async def test_resume_while_still_executing_409(tmp_path: Path) -> None:
     """run 仍在后台执行（未崩溃）→ resume 拒绝 409（防双跑/副作用重复）。"""
     block = asyncio.Event()  # 不 set：handler 悬停，run 持续 RUNNING
-    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=18713)
+    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -163,7 +163,7 @@ async def test_resume_while_still_executing_409(tmp_path: Path) -> None:
 
 
 async def test_resume_unknown_run_404(tmp_path: Path) -> None:
-    server = AgentSDKServer(_hanging_factory(tmp_path, asyncio.Event()), port=18711)
+    server = AgentSDKServer(_hanging_factory(tmp_path, asyncio.Event()), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -177,7 +177,7 @@ async def test_resume_terminal_run_409(tmp_path: Path) -> None:
     """终态 run 不可恢复 → 409（pre-check 直接映射，无需触发 IllegalTransition）。"""
     block = asyncio.Event()
     block.set()  # handler 立即返回 → run 正常跑完到终态
-    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=18712)
+    server = AgentSDKServer(_hanging_factory(tmp_path, block), port=0)
     await server.start()
     try:
         async with ClientSession() as client:

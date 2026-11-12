@@ -1,5 +1,7 @@
 """T11 OpenAI Realtime 接入点：key 解析 + 明确缺失提示 + 会话骨架。"""
 
+import asyncio
+
 import pytest
 
 
@@ -60,3 +62,72 @@ async def test_realtime_session_skeleton_roundtrip(monkeypatch) -> None:
         ("send", "sess_1", "hello"),
         ("close", "sess_1"),
     ]
+
+
+# ---------- V7-T5: mock socket 协议级验证（骨架从"未验证"变"协议验证过"） ----------
+
+async def test_realtime_skeleton_over_mock_socket(monkeypatch) -> None:
+    """本地 websockets mock server 说适配器方言——open/send/stream/close 真跑通。"""
+    import json
+
+    import websockets
+    from agent_adapters.realtime_openai import OpenAIRealtimeAdapter
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock")
+    seen_auth: list[str] = []
+    seen_client_msgs: list[dict] = []
+
+    async def _handler(ws):  # noqa: ANN001 — websockets 回调
+        seen_auth.append(ws.request.headers.get("Authorization", ""))
+        await ws.send(json.dumps({"type": "opened", "payload": {"ready": True}}))
+        async for raw in ws:
+            msg = json.loads(raw)
+            seen_client_msgs.append(msg)
+            t = msg.get("type")
+            if t == "session.update":
+                await ws.send(json.dumps({
+                    "type": "session_resumed", "payload": {"updated": True},
+                }))
+            elif t == "text":
+                await ws.send(json.dumps({
+                    "type": "transcript_in", "payload": {"text": msg["text"]},
+                }))
+                await ws.send(json.dumps({
+                    "type": "transcript_out", "payload": {"text": f"echo: {msg['text']}"},
+                }))
+            elif t == "close":
+                await ws.send(json.dumps({"type": "closed", "payload": {}}))
+                await ws.close()
+                return
+
+    server = await websockets.serve(_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    try:
+        adapter = OpenAIRealtimeAdapter(
+            endpoint=f"ws://127.0.0.1:{port}", api_key="sk-mock"
+        )
+        sid = await adapter.open_session(instructions="你是一个助手")
+        assert sid.startswith("sess_")
+
+        await adapter.send_text(sid, "hello")
+
+        got_in = got_out = False
+        async with asyncio.timeout(5):
+            async for event in adapter.stream(sid):
+                if event.type == "transcript_in" and event.payload.get("text") == "hello":
+                    got_in = True
+                if event.type == "transcript_out" and event.payload.get("text") == "echo: hello":
+                    got_out = True
+                if got_in and got_out:
+                    break
+        assert got_in and got_out, f"echo 链路未闭环: in={got_in} out={got_out}"
+
+        await adapter.close_session(sid)
+        # 服务器侧收到完整协议序列
+        types = [m["type"] for m in seen_client_msgs]
+        assert "session.update" in types and "text" in types and "close" in types
+        assert seen_auth and seen_auth[0] == "Bearer sk-mock", "Bearer 头必须随连接发送"
+    finally:
+        server.close()
+        await server.wait_closed()

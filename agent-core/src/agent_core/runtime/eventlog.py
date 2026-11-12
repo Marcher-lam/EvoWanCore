@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_events_correlation ON events(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_events_correlation_seq ON events(correlation_id, seq);
 """
 
 
@@ -32,6 +33,10 @@ class EventLog(Protocol):
     async def append(self, event: RuntimeEvent) -> None: ...
 
     def iter_events(self, correlation_id: str | None = None) -> AsyncIterator[RuntimeEvent]: ...
+
+    def iter_events_with_seq(
+        self, correlation_id: str, after_seq: int = -1
+    ) -> AsyncIterator[tuple[int, RuntimeEvent]]: ...
 
 
 class SqliteEventLog:
@@ -95,4 +100,34 @@ class SqliteEventLog:
                 causation_id=row[5],
                 correlation_id=row[6],
                 payload=json.loads(row[7]),
+            )
+
+    async def iter_events_with_seq(
+        self, correlation_id: str, after_seq: int = -1
+    ) -> AsyncIterator[tuple[int, RuntimeEvent]]:
+        """seq 游标增量读（V7-T2）：只返回 seq > after_seq 的事件，O(增量) 而非 O(全量)。
+
+        SSE 长连接轮询专用——每轮只读新事件，消除全量 fetchall 的 O(n²) 累计。
+        """
+        conn = await self._connect()
+        try:
+            cur = await conn.execute(
+                "SELECT seq, id, type, ts, subject_type, subject_id, causation_id,"
+                " correlation_id, payload FROM events"
+                " WHERE correlation_id = ? AND seq > ? ORDER BY seq",
+                (correlation_id, after_seq),
+            )
+            rows = await cur.fetchall()
+        finally:
+            await conn.close()
+        for row in rows:
+            yield row[0], RuntimeEvent(
+                id=row[1],
+                type=row[2],
+                ts=datetime.fromisoformat(row[3]),
+                subject_type=row[4],
+                subject_id=row[5],
+                causation_id=row[6],
+                correlation_id=row[7],
+                payload=json.loads(row[8]),
             )

@@ -9,7 +9,7 @@ class _FakeEnvServer:
     def __init__(self) -> None:
         self.acts: list[dict] = []
         self.runner: web.AppRunner | None = None
-        self.port = 18500
+        self.port = 0  # start() 后回读实际端口
 
     async def start(self) -> None:
         async def _observe(_request: web.Request) -> web.Response:
@@ -35,8 +35,9 @@ class _FakeEnvServer:
         app.router.add_post("/act", _act)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "127.0.0.1", self.port)
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)  # 动态端口
         await site.start()
+        self.port = self.runner.addresses[0][1]
 
     async def stop(self) -> None:
         if self.runner:
