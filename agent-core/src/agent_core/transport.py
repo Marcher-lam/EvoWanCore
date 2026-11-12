@@ -38,8 +38,9 @@ class A2AEnvelope(BaseModel):
 class HTTPAgentTransport:
     """实现 AgentTransport Protocol：send POST 信封；receive 从收件箱取回复。"""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, auth_token: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
+        self._auth_token = auth_token
         self._inbox: deque[A2AEnvelope] = deque(maxlen=1024)
         self._inbox_event = asyncio.Event()
 
@@ -50,10 +51,15 @@ class HTTPAgentTransport:
             if isinstance(envelope, A2AEnvelope)
             else A2AEnvelope(**envelope)
         )
+        headers = (
+            {"Authorization": f"Bearer {self._auth_token}"}
+            if self._auth_token else {}
+        )
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{self._base_url}/a2a",
                 json=env.model_dump(),
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 204:
@@ -77,6 +83,8 @@ class InboundA2AHandler:
 
     handler 返回 A2AEnvelope（作为回复）或 None（204 无回复）；
     回调抛异常 → 500（不吞错）。
+    鉴权（V7-T4）：auth_token 设置后，POST /a2a 必须带
+    `Authorization: Bearer <token>`，否则 401；默认 None=开放（回环部署兼容）。
     """
 
     def __init__(
@@ -84,14 +92,22 @@ class InboundA2AHandler:
         port: int,
         handler: Callable[[A2AEnvelope], Any],
         host: str = "127.0.0.1",
+        auth_token: str | None = None,
     ) -> None:
         self._port = port
         self._host = host
         self._handler = handler
+        self._auth_token = auth_token
         self._runner: web.AppRunner | None = None
 
     async def start(self) -> None:
         async def _a2a(request: web.Request) -> web.Response:
+            if self._auth_token is not None:
+                auth = request.headers.get("Authorization", "")
+                if auth != f"Bearer {self._auth_token}":
+                    return web.json_response(
+                        {"error": "unauthorized"}, status=401
+                    )
             try:
                 envelope = A2AEnvelope(**await request.json())
                 reply = self._handler(envelope)
@@ -117,6 +133,15 @@ class InboundA2AHandler:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
+        # V7-T3：port=0 → 回读实际端口
+        if self._port == 0:
+            addresses = self._runner.addresses
+            self._port = addresses[0][1] if addresses else self._port
+
+    @property
+    def port(self) -> int:
+        """实际监听端口（port=0 启动后为内核分配值）。"""
+        return self._port
 
     async def stop(self) -> None:
         if self._runner:

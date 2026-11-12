@@ -86,7 +86,7 @@ async def test_submit_queued_then_terminal(tmp_path: Path) -> None:
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18300)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -121,7 +121,7 @@ async def test_agent_routing_no_silent_fallback(tmp_path: Path) -> None:
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18301)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -145,7 +145,7 @@ async def test_cancel_unknown_run_404_and_idempotent(tmp_path: Path) -> None:
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18302)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -171,7 +171,7 @@ async def test_explore_requires_app_503(tmp_path: Path) -> None:
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18303)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -202,7 +202,7 @@ async def test_memory_purge_endpoint(tmp_path: Path) -> None:
     await store.put(MemoryRecord(
         id="mem_ep_1", namespace=NS_RULES, kind="rule", content={"r": 1},
     ))
-    server = AgentSDKServer(factory, port=18304)
+    server = AgentSDKServer(factory, port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -224,7 +224,7 @@ async def test_memory_purge_endpoint(tmp_path: Path) -> None:
         await server.stop()
 
     # 未配置 memory 组件 → 503
-    server2 = AgentSDKServer(_make_app_factory(tmp_path / "x"), port=18305)
+    server2 = AgentSDKServer(_make_app_factory(tmp_path / "x"), port=0)
     await server2.start()
     try:
         from aiohttp import ClientSession as CS

@@ -44,11 +44,13 @@ class AgentSDKServer:
     """HTTP API 服务器——工厂函数返回含 runtime 等组件的字典。"""
 
     def __init__(self, app_factory: AppFactory, host: str = "127.0.0.1",
-                 port: int = 8300, sse_poll_s: float = 0.05) -> None:
+                 port: int = 8300, sse_poll_s: float = 0.05,
+                 sse_heartbeat_s: float = 5.0) -> None:
         self._factory = app_factory
         self._host = host
         self._port = port
         self._sse_poll_s = sse_poll_s
+        self._sse_heartbeat_s = sse_heartbeat_s
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None
         self._bg: dict[str, asyncio.Task] = {}  # run_id → 后台任务（防双跑 + 防 GC）
@@ -126,7 +128,9 @@ class AgentSDKServer:
 
             语义：背压依赖 StreamResponse.write 等待对端排空（有界写缓冲）；
             客户端断连 → write 抛 ConnectionError → 干净退出；
-            Last-Event-ID 头 = 断线重连游标（只发该 id 之后的事件）。
+            Last-Event-ID 头 = 断线重连游标（只发该 id 之后的事件）；
+            空闲超 heartbeat_s 发 `: ping` 注释帧（保活 + 死对端检测，V7-T2）；
+            事件读取走 seq 游标增量（O(增量)，非全量 fetchall）。
             """
             run_id = request.match_info["run_id"]
             runtime = self._components["runtime"]
@@ -141,21 +145,21 @@ class AgentSDKServer:
             })
             await resp.prepare(request)
 
-            sent_ids: set[str] = set()
             terminal = {"succeeded", "failed", "cancelled"}
+            last_seq = -1
+            sent_ids: set[str] = set()
+            suppress_until_hit = last_event_id is not None  # 断点及之前全抑制
             quiet_rounds = 0  # 终态后的静默确认拍数（防状态先落盘、尾事件后到的竞态）
+            last_write = asyncio.get_running_loop().time()
             try:
                 while True:
-                    events = [e async for e in runtime.events(run_id)]
-                    if last_event_id is not None and not sent_ids:
-                        ids = [e.id for e in events]
-                        if last_event_id in ids:
-                            # 游标命中：断点及之前全部标记已发；
-                            # 未命中（过期/伪造 id）→ 从头全量重放（documented）
-                            for e in events[: ids.index(last_event_id) + 1]:
-                                sent_ids.add(e.id)
                     emitted = 0
-                    for e in events:
+                    async for seq, e in runtime.events_with_seq(run_id, last_seq):
+                        last_seq = max(last_seq, seq)
+                        if suppress_until_hit:
+                            if e.id == last_event_id:
+                                suppress_until_hit = False  # 命中：其后开始发送
+                            continue
                         if e.id in sent_ids:
                             continue
                         payload = EventResponse(
@@ -171,6 +175,11 @@ class AgentSDKServer:
                         )
                         sent_ids.add(e.id)
                         emitted += 1
+                        last_write = asyncio.get_running_loop().time()
+                    # Last-Event-ID 未命中（过期/伪造）：首轮全扫已推进游标——
+                    # 历史不再补发，仅推后续新事件（documented）
+                    if suppress_until_hit and last_seq != -1:
+                        suppress_until_hit = False
                     run = await runtime.load_run(run_id)
                     if run is not None and run.state.value in terminal:
                         # 终态 ≠ 已排空：状态先落盘、RunStateChanged/RunVerified
@@ -181,6 +190,10 @@ class AgentSDKServer:
                             break
                     else:
                         quiet_rounds = 0
+                    now = asyncio.get_running_loop().time()
+                    if now - last_write >= self._sse_heartbeat_s:
+                        await resp.write(b": ping\n\n")  # 注释帧：客户端忽略
+                        last_write = now
                     await asyncio.sleep(self._sse_poll_s)
                 await resp.write(b"event: end\ndata: {}\n\n")
                 await resp.write_eof()
@@ -300,6 +313,10 @@ class AgentSDKServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
+        # V7-T3：port=0 → 回读内核分配的临时端口（CI 并行免碰撞）
+        if self._port == 0:
+            addresses = self._runner.addresses
+            self._port = addresses[0][1] if addresses else self._port
 
     async def stop(self) -> None:
         # 等后台 run 收口（有界：运行中的任务由 runtime 自身终态化）
@@ -309,6 +326,11 @@ class AgentSDKServer:
             )
         if self._runner:
             await self._runner.cleanup()
+
+    @property
+    def port(self) -> int:
+        """实际监听端口（port=0 启动后为内核分配值）。"""
+        return self._port
 
     @property
     def url(self) -> str:

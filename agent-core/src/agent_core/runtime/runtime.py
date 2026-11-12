@@ -8,6 +8,7 @@ OUTCOME_UNKNOWN（RECONCILIATION，回执丢失语义）。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from agent_core.action import ActionRequest, ActionStatus, action_transition
 from agent_core.capability import CapabilityRegistry
@@ -117,6 +118,10 @@ class AgentRuntime:
     def events(self, run_id: str):
         """M8：公有事件流（外部消费免触 _log）。"""
         return self._log.iter_events(run_id)
+
+    def events_with_seq(self, run_id: str, after_seq: int = -1):
+        """V7-T2：seq 游标增量事件流（SSE 长连接轮询专用）。"""
+        return self._log.iter_events_with_seq(run_id, after_seq)
 
     # ---------- 提交与主循环 ----------
 
@@ -344,11 +349,22 @@ class AgentRuntime:
         cancel_event = self._cancel_events.setdefault(run.id, asyncio.Event())
         dispatch_task = asyncio.create_task(self._executor.dispatch(action))
         cancel_wait = asyncio.create_task(cancel_event.wait())
-        done, pending = await asyncio.wait(
-            {dispatch_task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
-        )
+        try:
+            done, pending = await asyncio.wait(
+                {dispatch_task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:
+            # 外层取消（crash-sim/进程退出）：asyncio.wait 不连带子任务——
+            # 必须显式 cancel+reap，否则 dispatch_task/cancel_wait 泄漏为
+            # 永久 pending（V7-T1 孤儿任务收口）
+            for t in (dispatch_task, cancel_wait):
+                t.cancel()
+            await asyncio.gather(dispatch_task, cancel_wait, return_exceptions=True)
+            raise
         if dispatch_task in done:
             cancel_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_wait  # reap：不留未收口的 cancelled 任务
             return dispatch_task.result()
         # 取消先到：回执未回 → OUTCOME_UNKNOWN；后台任务结果到达后被丢弃
         dispatch_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)

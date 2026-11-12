@@ -721,3 +721,56 @@ async def test_checkpoint_preserves_image_url_reference(tmp_path: Path) -> None:
     # 正确行为（无 VLM 不应静默降级）。测试只断言 checkpoint 结构 + 参数管道。
     assert cp["task"]["constraints"].get("image_doc_id") == "doc_i2"
     assert "image_url" not in cp["task"]["constraints"], "base64 已剔（lean）"
+
+
+# ---------- V7-T1: 孤儿任务收口 ----------
+
+async def test_dispatch_cancel_reaps_orphan_tasks(tmp_path: Path) -> None:
+    """外层取消（crash-sim）后 dispatch_task/cancel_wait 不得残留 pending。
+
+    V6 终评审 Low：bg.cancel() 打断 asyncio.wait 后两个子任务泄漏——
+    dispatch_task 悬挂于 handler、cancel_wait 悬挂于永不 set 的 Event。
+    """
+    block = asyncio.Event()
+
+    async def hanging_handler(args):
+        await block.wait()
+        return {"fields": {}}
+
+    env = Env(
+        tmp_path,
+        responses=[
+            InferResponse(tool_calls=[
+                {"id": "c1", "name": "extract_fields", "arguments": {}}
+            ])
+        ],
+        handler=hanging_handler,
+    )
+    submit_task = asyncio.create_task(env.runtime.submit(_spec(), env.agent()))
+    run_id = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        async for e in env.event_log.iter_events():
+            if e.type == "ActionDispatched":
+                run_id = e.correlation_id
+                break
+        if run_id:
+            break
+    assert run_id
+
+    submit_task.cancel()
+    try:
+        await submit_task
+    except asyncio.CancelledError:
+        pass
+    block.set()  # 释放 handler——修复后 dispatch_task 应能收口
+
+    for _ in range(20):  # 给残留任务收口的调度机会
+        await asyncio.sleep(0)
+
+    current = asyncio.current_task()
+    strays = [
+        t for t in asyncio.all_tasks()
+        if t is not current and not t.done()
+    ]
+    assert strays == [], f"孤儿任务泄漏: {[(t.get_name(), t) for t in strays]}"

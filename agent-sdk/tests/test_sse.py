@@ -146,7 +146,7 @@ async def _read_stream(client, url: str, headers: dict | None = None):
 
 async def test_sse_streams_live_events(tmp_path: Path) -> None:
     """运行中打开流 → 首事件在终态前实时到达 → 收满 ≥3 事件 → end 关闭。"""
-    server = AgentSDKServer(_slow_factory(tmp_path), port=18700)
+    server = AgentSDKServer(_slow_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -196,7 +196,7 @@ async def test_sse_streams_live_events(tmp_path: Path) -> None:
 
 
 async def test_sse_unknown_run_404(tmp_path: Path) -> None:
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18701)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -208,7 +208,7 @@ async def test_sse_unknown_run_404(tmp_path: Path) -> None:
 
 async def test_sse_last_event_id_resume(tmp_path: Path) -> None:
     """Last-Event-ID 头：从该事件之后重放（断线重连游标语义）。"""
-    server = AgentSDKServer(_make_app_factory(tmp_path), port=18702)
+    server = AgentSDKServer(_make_app_factory(tmp_path), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -255,7 +255,7 @@ async def test_sse_tail_events_not_lost(tmp_path: Path) -> None:
             InferResponse(tool_calls=[{"id": "c", "name": "noop", "arguments": {}}]),
             InferResponse(text="done"),
         ] * 5,  # 5 个 run × 2 条/run
-    ), port=18703)
+    ), port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -276,4 +276,68 @@ async def test_sse_tail_events_not_lost(tmp_path: Path) -> None:
                 assert types[-1] in ("RunVerified", "RunFailed"), \
                     "终局事件必须最后送达"
     finally:
+        await server.stop()
+
+
+async def test_sse_heartbeat_on_idle(tmp_path: Path) -> None:
+    """V7-T2：run 悬挂（无新事件）超 heartbeat_s → 收到 `: ping` 注释帧。"""
+    block = asyncio.Event()
+
+    class _Hanging:
+        def __init__(self) -> None:
+            from agent_core.models import Modality, ModelCapabilities
+
+            self._caps = ModelCapabilities(
+                model_id="m-hang-sse", inputs={Modality.TEXT},
+                tools={"native_tool_call"},
+            )
+
+        def capabilities(self):
+            return self._caps
+
+        async def infer(self, request):
+            from agent_core.models import InferResponse
+
+            await block.wait()
+            return InferResponse(text="done")
+
+    base = _make_app_factory(tmp_path, responses=[])
+
+    def factory():
+        from agent_core.models import ModelGateway
+
+        components = base()
+        gw = ModelGateway()
+        gw.register(_Hanging())
+        components["runtime"]._gateway = gw  # noqa: SLF001
+        return components
+
+    server = AgentSDKServer(factory, sse_heartbeat_s=0.1)  # port=0 动态
+    await server.start()
+    try:
+        assert server.port > 0, "port=0 应回读临时端口"
+        async with ClientSession() as client:
+            async with client.post(f"{server.url}/runs", json={
+                "task_id": "sse-hb", "kind": "test", "goal": {},
+                "acceptance_criteria": [{"check": "done"}],
+            }) as resp:
+                run_id = (await resp.json())["run_id"]
+
+            got_ping = False
+            async with client.get(
+                f"{server.url}/runs/{run_id}/events/stream",
+                timeout=ClientTimeout(total=5),
+            ) as stream:
+                async for raw in stream.content:
+                    line = raw.decode().strip()
+                    if line.startswith(":"):
+                        if "ping" in line:
+                            got_ping = True
+                            break  # 证明空闲保活生效即可
+                    elif line.startswith(("data:", "event:")):
+                        continue  # 重放事件忽略
+            assert got_ping, "空闲超 heartbeat_s 必须发 : ping 帧"
+            block.set()  # 释放悬挂模型，让后台任务收口
+    finally:
+        block.set()
         await server.stop()

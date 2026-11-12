@@ -128,7 +128,7 @@ async def test_v6_sse_stream_e2e(tmp_path: Path) -> None:
         components["runtime"]._gateway = gw  # noqa: SLF001
         return components
 
-    server = AgentSDKServer(factory, port=18800)
+    server = AgentSDKServer(factory, port=0)
     await server.start()
     try:
         async with ClientSession() as client:
@@ -201,7 +201,7 @@ async def test_v6_resume_e2e(tmp_path: Path) -> None:
             ), hanging)
         return components
 
-    server = AgentSDKServer(factory, port=18801)
+    server = AgentSDKServer(factory, port=0)
     await server.start()
     try:
         async with ClientSession() as client:
