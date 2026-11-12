@@ -23,6 +23,7 @@ from agent_sdk.models import (
     EventResponse,
     ExploreResponse,
     PurgeResponse,
+    ResumeRunRequest,
     RunStatusResponse,
     SubmitRunRequest,
 )
@@ -43,13 +44,14 @@ class AgentSDKServer:
     """HTTP API 服务器——工厂函数返回含 runtime 等组件的字典。"""
 
     def __init__(self, app_factory: AppFactory, host: str = "127.0.0.1",
-                 port: int = 8300) -> None:
+                 port: int = 8300, sse_poll_s: float = 0.05) -> None:
         self._factory = app_factory
         self._host = host
         self._port = port
+        self._sse_poll_s = sse_poll_s
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None
-        self._bg: set[asyncio.Task] = set()  # 强引用防 GC
+        self._bg: dict[str, asyncio.Task] = {}  # run_id → 后台任务（防双跑 + 防 GC）
 
     def _routes(self) -> web.RouteTableDef:
         routes = web.RouteTableDef()
@@ -79,8 +81,12 @@ class AgentSDKServer:
             )
             # 提交-轮询：同步建 run 落盘 QUEUED，执行转后台，立即返回 run_id
             run_id, bg = await runtime.submit_bg(task, agent)
-            self._bg.add(bg)
-            bg.add_done_callback(self._bg.discard)
+
+            def _discard(_t, rid=run_id) -> None:
+                self._bg.pop(rid, None)
+
+            self._bg[run_id] = bg
+            bg.add_done_callback(_discard)
             return web.json_response(
                 RunStatusResponse(
                     run_id=run_id, state="queued", task_id=body.task_id
@@ -113,6 +119,111 @@ class AgentSDKServer:
                     payload=e.payload,
                 ).model_dump())
             return web.json_response({"events": events, "count": len(events)})
+
+        @routes.get("/runs/{run_id}/events/stream")
+        async def stream_events(request: web.Request) -> web.StreamResponse:
+            """SSE：重放已有事件 → 增量推送 → 终态排空后 event: end 关闭。
+
+            语义：背压依赖 StreamResponse.write 等待对端排空（有界写缓冲）；
+            客户端断连 → write 抛 ConnectionError → 干净退出；
+            Last-Event-ID 头 = 断线重连游标（只发该 id 之后的事件）。
+            """
+            run_id = request.match_info["run_id"]
+            runtime = self._components["runtime"]
+            if await runtime.load_run(run_id) is None:
+                return web.json_response({"error": "run not found"}, status=404)
+            last_event_id = request.headers.get("Last-Event-ID")
+
+            resp = web.StreamResponse(headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            })
+            await resp.prepare(request)
+
+            sent_ids: set[str] = set()
+            terminal = {"succeeded", "failed", "cancelled"}
+            quiet_rounds = 0  # 终态后的静默确认拍数（防状态先落盘、尾事件后到的竞态）
+            try:
+                while True:
+                    events = [e async for e in runtime.events(run_id)]
+                    if last_event_id is not None and not sent_ids:
+                        ids = [e.id for e in events]
+                        if last_event_id in ids:
+                            # 游标命中：断点及之前全部标记已发；
+                            # 未命中（过期/伪造 id）→ 从头全量重放（documented）
+                            for e in events[: ids.index(last_event_id) + 1]:
+                                sent_ids.add(e.id)
+                    emitted = 0
+                    for e in events:
+                        if e.id in sent_ids:
+                            continue
+                        payload = EventResponse(
+                            id=e.id, type=e.type, ts=e.ts.isoformat(),
+                            subject_type=e.subject_type, subject_id=e.subject_id,
+                            payload=e.payload,
+                        ).model_dump()
+                        await resp.write(
+                            (
+                                f"id: {payload['id']}\n"
+                                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                            ).encode()
+                        )
+                        sent_ids.add(e.id)
+                        emitted += 1
+                    run = await runtime.load_run(run_id)
+                    if run is not None and run.state.value in terminal:
+                        # 终态 ≠ 已排空：状态先落盘、RunStateChanged/RunVerified
+                        # 尾事件随后才写。连续 2 拍静默（≥2×poll 间隔无新事件）
+                        # 才认定排空，杜绝 end 提前关闭丢尾事件。
+                        quiet_rounds = quiet_rounds + 1 if emitted == 0 else 0
+                        if quiet_rounds >= 2:
+                            break
+                    else:
+                        quiet_rounds = 0
+                    await asyncio.sleep(self._sse_poll_s)
+                await resp.write(b"event: end\ndata: {}\n\n")
+                await resp.write_eof()
+            except ConnectionError:
+                pass  # 客户端断连：干净退出（不吞服务端其他错误）
+            return resp
+
+        @routes.post("/runs/{run_id}/resume")
+        async def resume_run(request: web.Request) -> web.Response:
+            """恢复非终态 run（crash/中断后）；image_urls 注入协议见 ResumeRunRequest。"""
+            run_id = request.match_info["run_id"]
+            runtime = self._components["runtime"]
+            if await runtime.load_run(run_id) is None:
+                return web.json_response({"error": "run not found"}, status=404)
+            body = ResumeRunRequest(**await request.json())
+            # 防双跑：本进程内仍有该 run 的活跃执行（提交或恢复）→ 拒绝
+            alive = self._bg.get(run_id)
+            if alive is not None and not alive.done():
+                return web.json_response(
+                    {"error": "run still executing"}, status=409
+                )
+            run = await runtime.load_run(run_id)
+            terminal = {"succeeded", "failed", "cancelled"}
+            if run is not None and run.state.value in terminal:
+                return web.json_response(
+                    {"error": f"run not resumable: terminal {run.state.value}"},
+                    status=409,
+                )
+            # 恢复也走后台（悬挂 capability 不挂死 HTTP；与提交-轮询语义一致）
+            bg = asyncio.create_task(runtime.resume(
+                run_id, image_urls=body.image_urls or None,
+            ))
+
+            def _discard(_t, rid=run_id) -> None:
+                self._bg.pop(rid, None)
+
+            self._bg[run_id] = bg
+            bg.add_done_callback(_discard)
+            return web.json_response(
+                RunStatusResponse(
+                    run_id=run_id, state="resuming", task_id=run.task_id
+                ).model_dump(), status=202
+            )
 
         @routes.post("/runs/{run_id}/cancel")
         async def cancel_run(request: web.Request) -> web.Response:
@@ -193,7 +304,9 @@ class AgentSDKServer:
     async def stop(self) -> None:
         # 等后台 run 收口（有界：运行中的任务由 runtime 自身终态化）
         if self._bg:
-            await asyncio.gather(*self._bg, return_exceptions=True)
+            await asyncio.gather(
+                *self._bg.values(), return_exceptions=True
+            )
         if self._runner:
             await self._runner.cleanup()
 
