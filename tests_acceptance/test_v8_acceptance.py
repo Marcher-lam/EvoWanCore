@@ -58,21 +58,23 @@ async def test_v8_a2a_standard_discover_and_talk() -> None:
 # C2 TS SDK：编译 + 对真 Python server 的 node 冒烟 e2e
 # ---------------------------------------------------------------------------
 
-async def test_v8_ts_sdk_compiles_and_smokes() -> None:
-    """tsc --noEmit 过 + node 冒烟（SMOKE PASS）。"""
+def test_v8_ts_sdk_compiles_and_smokes() -> None:
+    """tsc build（产 dist）+ node 冒烟（SMOKE PASS）——新 clone 可跑。"""
+    import shutil
+
+    import pytest
+
     ts_dir = _REPO / "agent-sdk-ts"
     if not (ts_dir / "node_modules").exists():
-        pytest_skip_msg = "node_modules 未安装（npm install 后再跑）"
-        compile_check = subprocess.run(
-            ["npx", "--yes", "typescript@5", "tsc", "--version"],
-            cwd=ts_dir, capture_output=True,
+        if shutil.which("npm") is None:
+            pytest.skip("npm 不可用（TS SDK 冒烟跳过）")
+        install = subprocess.run(
+            ["npm", "install"], cwd=ts_dir, capture_output=True, text=True,
+            timeout=300,
         )
-        if compile_check.returncode != 0:
-            import pytest
-
-            pytest.skip(pytest_skip_msg)
+        assert install.returncode == 0, f"npm install 失败: {install.stderr[-400:]}"
     for cmd in (
-        ["npx", "tsc", "-p", "tsconfig.json", "--noEmit"],
+        ["npx", "tsc", "-p", "tsconfig.json"],  # build（产 dist，非 noEmit）
         ["node", "smoke/run.mjs"],
     ):
         out = subprocess.run(

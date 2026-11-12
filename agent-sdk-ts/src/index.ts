@@ -8,8 +8,8 @@ import {
   SdkHttpError,
   StreamOptions,
   SubmitRunRequest,
+  TERMINAL_STATES,
 } from "./types.js";
-import { TERMINAL_STATES } from "./types.js";
 
 export class AgentSDKClient {
   private readonly baseUrl: string;
@@ -37,11 +37,11 @@ export class AgentSDKClient {
     const intervalMs = opts.intervalMs ?? 100;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const run = await this.getRun(runId);
-      if (TERMINAL_STATES.has(run.state)) return run;
-      if (Date.now() > deadline) {
+      if (Date.now() > deadline) {  // 判定前置：挂住的请求也不能越过 deadline
         throw new Error(`waitForTerminal(${runId}) 超时 ${timeoutMs}ms`);
       }
+      const run = await this.getRun(runId);
+      if (TERMINAL_STATES.has(run.state)) return run;
       await sleep(intervalMs);
     }
   }
@@ -96,9 +96,16 @@ export class AgentSDKClient {
       Accept: "text/event-stream",
     };
     if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
+    // 连接建立 30s 超时（流本身长期打开，不受此限）；可被 signal 中止
+    const connectSignal = opts.signal ?? undefined;
     const resp = await fetch(
       `${this.baseUrl}/runs/${encodeURIComponent(runId)}/events/stream`,
-      { headers, signal: opts.signal },
+      {
+        headers,
+        signal: connectSignal
+          ? AbortSignal.any([connectSignal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
+      },
     );
     if (!resp.ok || !resp.body) {
       throw new SdkHttpError(resp.status, this.baseUrl, await resp.text());
@@ -110,6 +117,8 @@ export class AgentSDKClient {
       const { done, value } = await reader.read();
       if (done) return;
       buffer += decoder.decode(value, { stream: true });
+      // CRLF 兼容：先归一为 LF（跨 chunk 的 \r|\n 在下一轮 append 后被合并处理）
+      buffer = buffer.replace(/\r\n/g, "\n");
       // SSE 帧以空行分隔；逐帧解析 id:/data:/event:
       let sep: number;
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
@@ -117,13 +126,15 @@ export class AgentSDKClient {
         buffer = buffer.slice(sep + 2);
         if (frame.startsWith(":")) continue; // 心跳注释帧
         const lines = frame.split("\n");
-        let data = "";
+        const dataLines: string[] = [];
         let eventName = "";
         for (const line of lines) {
-          if (line.startsWith("data:")) data += line.slice(5).trim();
+          if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
           else if (line.startsWith("event:")) eventName = line.slice(6).trim();
         }
         if (eventName === "end") return; // 终态排空，流关闭
+        // 多行 data 按 SSE 规范以 \n join
+        const data = dataLines.join("\n");
         if (data) onEvent(JSON.parse(data) as SdkEvent);
       }
     }
@@ -141,6 +152,7 @@ export class AgentSDKClient {
       method,
       headers: body !== undefined ? { "Content-Type": "application/json" } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(30_000),  // 单请求上限（防挂死轮询）
     });
     if (resp.status !== expect) {
       throw new SdkHttpError(resp.status, path, await resp.text());

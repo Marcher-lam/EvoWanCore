@@ -1,15 +1,18 @@
 """TS SDK 冒烟服务端：最小工厂起 AgentSDKServer，stdout 打印 READY <url>。"""
 
 import asyncio
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+_TMP = Path(tempfile.mkdtemp(prefix="ts-smoke-"))
 
 
 async def main() -> None:
     from agent_sdk.api import AgentSDKServer
 
-    tmp = Path(tempfile.mkdtemp(prefix="ts-smoke-"))
+    tmp = _TMP
 
     def factory():
         from agent_core.capability import (
@@ -81,6 +84,7 @@ async def main() -> None:
             await asyncio.sleep(3600)
     finally:
         await server.stop()
+        shutil.rmtree(_TMP, ignore_errors=True)
 
 
 if __name__ == "__main__":

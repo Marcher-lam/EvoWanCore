@@ -36,8 +36,11 @@ async def test_agent_card_served() -> None:
                 assert resp.status == 200
                 card = await resp.json()
         assert card["name"] == "doc-worker"
-        assert card["protocol_version"].startswith("0.")
+        # wire = camelCase（A2A spec 互操作面，终评审 H1）
+        assert card["protocolVersion"].startswith("0.2")
+        assert card["preferredTransport"] == "JSONRPC"
         assert card["skills"][0]["id"] == "extract"
+        assert card["capabilities"]["pushNotifications"] is False
         assert card["capabilities"]["streaming"] is False  # Ruling: 不做 streaming
     finally:
         await ep.stop()
@@ -68,6 +71,8 @@ async def test_message_send_roundtrip() -> None:
         assert len(received) == 1
         assert received[0].payload["text"] == "抽取发票字段"
         assert received[0].message_type == "task_request"
+        assert received[0].from_agent == "a2a:remote", "远端身份稳定（不随 messageId 漂移）"
+        assert received[0].payload["message_id"], "远端 messageId 入 payload 对账"
     finally:
         await ep.stop()
 

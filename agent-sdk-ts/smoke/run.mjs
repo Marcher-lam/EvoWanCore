@@ -7,9 +7,6 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-const { AgentSDKClient, SdkHttpError, TERMINAL_STATES } = require("../dist/index.js");
-
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
   process.exitCode = 1;
@@ -20,6 +17,9 @@ function assert(cond, msg) {
 }
 
 async function main() {
+  const require = createRequire(import.meta.url);
+  const { AgentSDKClient, SdkHttpError } = require("../dist/index.js");
+
   // 1. 起 Python server：cwd=uv workspace 根（解析 workspace），脚本用绝对路径
   // smoke/run.mjs → 上两级 = 仓库根（fileURLToPath 防 URL 百分号编码）
   const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -99,8 +99,19 @@ async function main() {
   } catch (e) {
     fail(e.message);
   } finally {
+    // 温和终止 → 等退出（3s）→ SIGKILL 兜底（不留僵尸/不挂 node 事件循环）
     child.kill("SIGTERM");
+    const exited = new Promise((resolve) => child.on("exit", resolve));
+    const timedOut = await Promise.race([
+      exited.then(() => true),
+      sleep(3000).then(() => false),
+    ]);
+    if (!timedOut) child.kill("SIGKILL");
   }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 await main();

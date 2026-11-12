@@ -46,3 +46,21 @@ click/type/scroll/screenshot 真执行；supports_snapshot()=True；
 - [ ] GREEN → gates → Commit
 
 ## Task 4: V8 验收 + 终评审 + 合并 + push
+
+
+## 终评审 Ruling（2026-11-13）
+
+已修复：A2A wire camelCase（alias_generator + by_alias，含 kind:"message"
+判别字段与 preferredTransport）；from_agent 稳定身份 a2a:remote（远端
+messageId 入 payload 对账）；-32600/-32602 补齐；Card.url 回写实际地址；
+auth 头 latin-1 边界；A2ARpcError 结构化。C2 守卫改 build 流程（新 clone
+npm install→tsc build→smoke，npm 缺失 skip）。Playwright _ensure 加锁双检；
+observe 无 body 页面降级空 DOM。TS：单请求 30s 超时 + deadline 前置；
+SSE CRLF 归一 + 多行 data 规范 join（并修死循环回归）；smoke kill 等退出
++SIGKILL 兜底；temp 清理。
+
+有意遗留（backlog）：
+- A2A：Notification（无 id 不回包）严格语义；streaming/push/tasks 维持不做
+- Playwright：真站点适配（iframe/shadow DOM/网络等待）——当前 data: URL
+  最小闭环 + skip-if-no-browser
+- TS SDK：每请求新建 fetch 连接（无 keep-alive agent）

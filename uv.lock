@@ -39,7 +39,6 @@ browser = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-adapters", marker = "extra == 'browser'", editable = "agent-adapters" },
     { name = "agent-core", editable = "agent-core" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1" },

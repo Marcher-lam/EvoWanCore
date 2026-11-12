@@ -8,6 +8,8 @@ act = click/type/scroll/screenshot 真执行。浏览器按需懒启动；
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from typing import Any
 
 
@@ -23,6 +25,7 @@ class PlaywrightEnvironmentAdapter:
         self._pw: Any = None
         self._browser: Any = None
         self._page: Any = None
+        self._lock = asyncio.Lock()  # 懒启动双检（防并发双起浏览器）
 
     def supports_snapshot(self) -> bool:
         return True
@@ -30,6 +33,12 @@ class PlaywrightEnvironmentAdapter:
     async def _ensure(self) -> None:
         if self._page is not None:
             return
+        async with self._lock:
+            if self._page is not None:  # 双检：并发者已启动
+                return
+            await self._start()
+
+    async def _start(self) -> None:
         try:
             from playwright.async_api import async_playwright
         except ImportError as e:
@@ -51,10 +60,11 @@ class PlaywrightEnvironmentAdapter:
     async def observe(self) -> dict:
         """DOM 快照（可读性文本）+ PNG 截图 data URL。"""
         await self._ensure()
-        dom: str = await self._page.inner_text("body")
+        try:
+            dom: str = await self._page.inner_text("body")
+        except Exception:  # noqa: BLE001 — 无 body 页面 → 空 DOM 不炸会话
+            dom = ""
         png: bytes = await self._page.screenshot()
-        import base64
-
         return {
             "dom": dom,
             "screenshot_url": (
@@ -76,12 +86,11 @@ class PlaywrightEnvironmentAdapter:
                 value = await self._page.input_value(target)
                 return {"ok": True, "typed": action.get("text", ""), "value": value}
             if kind == "scroll":
+                # scroll 相对当前视口（target 参数仅作语义提示，不参与定位）
                 dy = 400 if action.get("direction", "down") == "down" else -400
                 await self._page.mouse.wheel(0, dy)
                 return {"ok": True}
             if kind == "screenshot":
-                import base64
-
                 png: bytes = await self._page.screenshot()
                 return {
                     "ok": True,

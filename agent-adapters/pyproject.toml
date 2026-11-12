@@ -6,7 +6,6 @@ dependencies = ['agent-core', 'httpx>=0.27', 'openai>=1.50', 'websockets>=13', '
 
 [project.optional-dependencies]
 browser = [
-    "agent-adapters",
     "playwright>=1.65.1",
 ]
 
