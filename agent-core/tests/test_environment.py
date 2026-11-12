@@ -104,9 +104,12 @@ def test_cua_tools_discoverable() -> None:
 
     ids = {d.id for d in registry.discover({"tags": ["cua"]})}
     assert {"cua_observe", "cua_click", "cua_type", "cua_screenshot"} <= ids
-    # 红线：CUA 写操作必须声明 write 副作用（不可伪装成 read）
+    # 红线：CUA 写操作必须声明 write 副作用 + 非空 auth_scope（需显式授权）
     by_id = {d.id: d for d in registry.discover({})}
     assert by_id["cua_click"].side_effect_level == "write"
     assert by_id["cua_type"].side_effect_level == "write"
+    assert by_id["cua_click"].auth_scope == ["cua:act"]
+    assert by_id["cua_type"].auth_scope == ["cua:act"]
     assert by_id["cua_observe"].side_effect_level == "read"
-    assert all(d.auth_scope == [] for d in by_id.values() if d.id.startswith("cua_"))
+    assert by_id["cua_observe"].auth_scope == []
+    assert by_id["cua_screenshot"].auth_scope == []

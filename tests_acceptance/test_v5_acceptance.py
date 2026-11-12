@@ -1,5 +1,6 @@
 """T12 V5 验收套件：生态层全栈——SDK/编排/A2A/CUA/记忆清除/Realtime 接入点。"""
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -75,7 +76,9 @@ def _sdk_app_factory(tmp_path: Path):
 
 
 async def test_v5_sdk_http_roundtrip(tmp_path: Path) -> None:
-    """POST /runs → 201 + run_id；GET /runs/{id} → succeeded；GET events ≥3。"""
+    """POST /runs → 201 QUEUED；轮询 → succeeded；GET events ≥3。"""
+    import asyncio
+
     from agent_sdk.api import AgentSDKServer
     from aiohttp import ClientSession
 
@@ -88,9 +91,17 @@ async def test_v5_sdk_http_roundtrip(tmp_path: Path) -> None:
                 "acceptance_criteria": [{"check": "done"}],
             }) as resp:
                 assert resp.status == 201
-                run_id = (await resp.json())["run_id"]
-            async with client.get(f"{server.url}/runs/{run_id}") as resp:
-                assert (await resp.json())["state"] == "succeeded"
+                body = await resp.json()
+                run_id = body["run_id"]
+                assert body["state"] == "queued", "提交-轮询：立即返回 QUEUED"
+            # 轮询到终态
+            for _ in range(250):
+                async with client.get(f"{server.url}/runs/{run_id}") as r:
+                    if (await r.json())["state"] == "succeeded":
+                        break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("run 未到 succeeded")
             async with client.get(f"{server.url}/runs/{run_id}/events") as resp:
                 body = await resp.json()
                 assert body["count"] >= 3
@@ -102,25 +113,84 @@ async def test_v5_sdk_http_roundtrip(tmp_path: Path) -> None:
 # A2 编排：能力匹配 + 并行执行
 # ---------------------------------------------------------------------------
 
-def test_v5_orchestration_policy_and_parallel() -> None:
-    """CapabilityCompositionPolicy 选人 + Orchestrator 并行（复用既有集成测试语义）。"""
-    from agent_core.orchestration import CapabilityCompositionPolicy
-
-    class _Agent:
-        def __init__(self, i, caps):
-            self.id, self.capabilities = i, caps
-
-    policy = CapabilityCompositionPolicy()
-
-    class _T:
-        kind = "extract"
-
-    selected = policy.select_participants(
-        _T(), [_Agent("a", ["extract"]), _Agent("b", ["export"])]
+async def test_v5_orchestration_policy_and_parallel(tmp_path: Path) -> None:
+    """CapabilityCompositionPolicy 选人 + Orchestrator 真并行执行到终态。"""
+    from agent_core.capability import (
+        CapabilityDescriptor,
+        CapabilityType,
+        InMemoryCapabilityRegistry,
     )
-    assert selected == ["a"]
-    assert policy.decide_termination(_T(), {"participants": {"a": "succeeded"}}) \
-        == "terminate"
+    from agent_core.evidence import SqliteEvidenceStore
+    from agent_core.models import (
+        FakeModelAdapter,
+        InferResponse,
+        Modality,
+        ModelCapabilities,
+        ModelGateway,
+    )
+    from agent_core.orchestration import CapabilityCompositionPolicy, Orchestrator
+    from agent_core.policy import DefaultPolicyEngine
+    from agent_core.runtime.driver import AgentSpec, VerificationResult
+    from agent_core.runtime.eventlog import SqliteEventLog
+    from agent_core.runtime.runtime import AgentRuntime
+    from agent_core.runtime.statestore import SqliteStateStore
+    from agent_core.task import TaskSpec
+
+    class _OKVerifier:
+        async def verify_action(self, request, result):
+            return VerificationResult(passed=True)
+
+        async def verify_task(self, task, evidence_refs):
+            return VerificationResult(passed=True)
+
+    def _runtime(tag: str) -> AgentRuntime:
+        registry = InMemoryCapabilityRegistry()
+
+        async def handler(args):
+            return {"ok": True}
+
+        registry.bind(
+            CapabilityDescriptor(
+                id="noop", type=CapabilityType.TOOL, name="noop",
+                input_schema={}, side_effect_level="read", auth_scope=[],
+            ), handler)
+        fake = FakeModelAdapter(
+            ModelCapabilities(
+                model_id=f"m-{tag}", inputs={Modality.TEXT}, tools={"native_tool_call"}
+            ),
+            [
+                InferResponse(tool_calls=[{"id": "c", "name": "noop", "arguments": {}}]),
+                InferResponse(text="done"),
+            ],
+        )
+        gateway = ModelGateway()
+        gateway.register(fake)
+        return AgentRuntime(
+            gateway=gateway, registry=registry,
+            policy_engine=DefaultPolicyEngine(),
+            event_log=SqliteEventLog(tmp_path / f"o{tag}_log.db"),
+            state_store=SqliteStateStore(tmp_path / f"o{tag}_state.db"),
+            evidence_store=SqliteEvidenceStore(
+                tmp_path / f"o{tag}_ev.db", tmp_path / f"o{tag}_blobs"),
+            verifier=_OKVerifier(),
+        )
+
+    agents = [
+        AgentSpec(id="w_a", role="worker", capabilities=["extract"], model_id="m-a"),
+        AgentSpec(id="w_b", role="worker", capabilities=["extract"], model_id="m-b"),
+        AgentSpec(id="w_c", role="worker", capabilities=["export"], model_id="m-c"),
+    ]
+    orchestrator = Orchestrator(
+        CapabilityCompositionPolicy(),
+        {"w_a": _runtime("a"), "w_b": _runtime("b"), "w_c": _runtime("c")},
+    )
+    task = TaskSpec(
+        id="v5_orch", kind="extract", goal={"what": "parallel"},
+        input_schema={}, constraints={}, acceptance_criteria=[{"check": "done"}],
+    )
+    results = await orchestrator.orchestrate(task, agents)
+    assert set(results) == {"w_a", "w_b"}, "只选 extract 能力者"
+    assert all(s == "succeeded" for s in results.values())
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +222,13 @@ async def test_v5_a2a_end_to_end() -> None:
     await inbound.start()
     try:
         transport = HTTPAgentTransport(found[0]["endpoint"])
-        reply = await transport.send(A2AEnvelope(
+        await transport.send(A2AEnvelope(
             from_agent="orchestrator", to_agent="worker",
             message_type="task_request", payload={"task": "extract"},
         ))
-        assert reply is not None
-        assert reply.message_type == "task_result"
-        assert reply.payload == {"done": True}
+        reply = await asyncio.wait_for(transport.receive(), timeout=5)
+        assert reply["message_type"] == "task_result"
+        assert reply["payload"] == {"done": True}
     finally:
         await inbound.stop()
 
@@ -196,12 +266,13 @@ async def test_v5_cua_adapter_and_redlines() -> None:
         registry = InMemoryCapabilityRegistry()
         register_cua_tools(registry, adapter)
         by_id = {d.id: d for d in registry.discover({})}
-        # 红线：写操作如实声明 write；全部 auth_scope 空
+        # 红线：写操作如实声明 write + 需显式授权；读操作免授权
         assert by_id["cua_click"].side_effect_level == "write"
         assert by_id["cua_type"].side_effect_level == "write"
-        assert all(
-            d.auth_scope == [] for d in by_id.values() if d.id.startswith("cua_")
-        )
+        assert by_id["cua_click"].auth_scope == ["cua:act"]
+        assert by_id["cua_type"].auth_scope == ["cua:act"]
+        assert by_id["cua_observe"].auth_scope == []
+        assert by_id["cua_screenshot"].auth_scope == []
     finally:
         await runner.cleanup()
 

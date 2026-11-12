@@ -33,7 +33,12 @@ class CapabilityCompositionPolicy:
 
 
 class Orchestrator:
-    """多 Agent 并行执行：策略选人 → gather submit → 汇总终态。"""
+    """多 Agent 并行执行：策略选人 → gather submit → 汇总终态。
+
+    一次性并行模式：所有参与者被提交并各自运行到终态，终止是结构性的
+    （gather 全返回）；policy.decide_termination 在汇总后调用并如实回传
+    decision——供调用方在迭代编排循环中复用同一策略。
+    """
 
     def __init__(
         self,
@@ -46,7 +51,7 @@ class Orchestrator:
     async def orchestrate(
         self, task: TaskSpec, agents: list[Any]
     ) -> dict[str, str]:
-        """返回 {agent_id: final_state}。"""
+        """返回 {agent_id: final_state}；单个 agent 异常 → "failed"（不弃兄弟结果）。"""
         participants = self._policy.select_participants(task, agents)
         if not participants:
             return {}
@@ -61,5 +66,18 @@ class Orchestrator:
             run = await runtime.submit(spec, agent_map[agent_id])
             return agent_id, run.state.value
 
-        results = await asyncio.gather(*[_run_one(a) for a in participants])
-        return dict(results)
+        results = await asyncio.gather(
+            *[_run_one(a) for a in participants], return_exceptions=True
+        )
+        states: dict[str, str] = {}
+        for agent_id, outcome in zip(participants, results, strict=True):
+            if isinstance(outcome, BaseException):
+                states[agent_id] = "failed"  # 异常隔离：不中止兄弟任务
+            else:
+                states[agent_id] = outcome[1]
+        # 策略终止判定如实执行（一次性模式下必为 terminate；保留接线供迭代复用）
+        decision = self._policy.decide_termination(
+            task, {"participants": states}
+        )
+        assert decision == "terminate", "一次性并行模式要求全部终态后终止"
+        return states

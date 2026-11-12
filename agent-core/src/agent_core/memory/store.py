@@ -42,7 +42,8 @@ class SqliteMemoryStore:
     """版本化存储：同一 id 的 put 产生新 revision；get 返回最新版本。
 
     query 默认只返回 lifecycle=ACTIVE 的当前版本；TOMBSTONED 是逻辑失效，
-    历史版本全量保留（spec §5.4：物理清除 V1 不做）。
+    历史版本保留；物理清除走 delete()（V5：全 revision DELETE + 审计，
+    见 memory/purge.py）。
     """
 
     def __init__(self, db_path: Path | str) -> None:

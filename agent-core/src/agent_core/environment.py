@@ -50,7 +50,8 @@ def register_cua_tools(
 ) -> list[CapabilityDescriptor]:
     """把 CUA observe/act 包装为能力注册进目录（模型可选用）。
 
-    副作用声明（红线）：observe/screenshot=read，click/type=write。
+    副作用与授权声明（红线）：observe/screenshot=read+免授权；
+    click/type=write 且要求显式授权 cua:act（部署方授予后方可被模型调用）。
     """
     descriptors = [
         CapabilityDescriptor(
@@ -65,7 +66,7 @@ def register_cua_tools(
                 "properties": {"target": {"type": "string"}},
                 "required": ["target"],
             },
-            side_effect_level="write", auth_scope=[], tags=["cua"],
+            side_effect_level="write", auth_scope=["cua:act"], tags=["cua"],
         ),
         CapabilityDescriptor(
             id="cua_type", type=CapabilityType.TOOL, name="env_type",
@@ -77,7 +78,7 @@ def register_cua_tools(
                 },
                 "required": ["target", "text"],
             },
-            side_effect_level="write", auth_scope=[], tags=["cua"],
+            side_effect_level="write", auth_scope=["cua:act"], tags=["cua"],
         ),
         CapabilityDescriptor(
             id="cua_screenshot", type=CapabilityType.TOOL, name="env_screenshot",

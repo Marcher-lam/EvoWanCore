@@ -1,5 +1,6 @@
 """T6/T7 A2A：HTTP JSON 信封 AgentTransport + 注册表。"""
 
+import asyncio
 from pathlib import Path
 
 from agent_core.transport import (
@@ -51,7 +52,7 @@ def test_registry_register_and_discover() -> None:
 
 
 async def test_transport_roundtrip(tmp_path: Path) -> None:
-    """send → 远端 handler 收到 envelope → reply → receive。"""
+    """send → 远端 handler 收到 envelope → reply 入收件箱 → receive 取出。"""
     received: list[A2AEnvelope] = []
 
     async def handler(envelope: A2AEnvelope) -> A2AEnvelope | None:
@@ -72,11 +73,37 @@ async def test_transport_roundtrip(tmp_path: Path) -> None:
             from_agent="a1", to_agent="a2",
             message_type="task_request", payload={"x": 1},
         )
-        reply = await transport.send(env)
-        assert reply is not None
-        assert reply.message_type == "reply"
-        assert reply.payload["echo"]["x"] == 1
+        assert await transport.send(env) is None, "send 按 Protocol 返回 None"
+        reply = await asyncio.wait_for(transport.receive(), timeout=5)
+        assert reply["message_type"] == "reply"
+        assert reply["payload"]["echo"]["x"] == 1
+        assert reply["reply_to"] == env.message_id
         assert len(received) == 1
         assert received[0].from_agent == "a1"
+    finally:
+        await inbound.stop()
+
+
+async def test_transport_receive_waits_then_gets_reply(tmp_path: Path) -> None:
+    """receive 先于回复到达：协作等待（无自旋），回复后立即返回。"""
+
+    async def handler(envelope: A2AEnvelope) -> A2AEnvelope:
+        await asyncio.sleep(0.05)
+        return A2AEnvelope(
+            from_agent=envelope.to_agent, to_agent=envelope.from_agent,
+            message_type="reply", payload={"late": True},
+        )
+
+    inbound = InboundA2AHandler(port=18401, handler=handler)
+    await inbound.start()
+    try:
+        transport = HTTPAgentTransport(base_url="http://127.0.0.1:18401")
+        receiver = asyncio.create_task(transport.receive())
+        await asyncio.sleep(0.01)  # receiver 先挂起等待
+        await transport.send(A2AEnvelope(
+            from_agent="a", to_agent="b", message_type="query", payload={},
+        ))
+        reply = await asyncio.wait_for(receiver, timeout=5)
+        assert reply["payload"] == {"late": True}
     finally:
         await inbound.stop()

@@ -18,7 +18,10 @@ Python 进程内。V5 的四个协议桩（reserved.py）全部变为可运行�
 ## 2. 目标
 
 **A 服务化 + SDK**（~4 任务）
-1. `agent-sdk` 包：FastAPI HTTP API 暴露 submit/cancel/resume/events/explore
+1. `agent-sdk` 包：HTTP API 暴露 submit/cancel/events/explore/memory-purge
+   （Ruling：aiohttp 而非 FastAPI——规避 pydantic 版本冲突；resume 端点
+   推迟 V6——内核 `runtime.resume()` 已就绪，HTTP 化需先定 image_urls
+   注入协议；SSE 流端点同推迟 V6）
 2. RESTful 端点映射内核操作（POST /runs、GET /runs/{id}/events 等）
 3. 类型化请求/响应模型（复用 Pydantic 契约）
 

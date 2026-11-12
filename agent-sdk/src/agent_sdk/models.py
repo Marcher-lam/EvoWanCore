@@ -40,6 +40,12 @@ class ExploreRequest(BaseModel):
     max_waves: int | None = 2
 
 
+class PurgeResponse(BaseModel):
+    record_id: str
+    deleted_revisions: int
+    reason: str
+
+
 class ExploreResponse(BaseModel):
     waves_executed: int = 0
     tasks_executed: int = 0

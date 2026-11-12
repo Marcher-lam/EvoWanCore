@@ -34,7 +34,8 @@ transport/environment/purge 四模块；全部 Protocol 桩签名不变、只加
 - `GET /runs/{id}` → run 状态
 - `GET /runs/{id}/events` → 事件列表（JSON）
 - `POST /runs/{id}/cancel` → 取消
-- `DELETE /memory/{namespace}/{id}` → 记忆清除（T5）
+- `DELETE /memory/{namespace}/{id}` → 记忆清除（T5；终评审 H3 修复：已交付，
+  需工厂提供 memory_store + purge_auditor 组件，缺失 → 503）
 - [ ] RED：`test_submit_and_get_run`（HTTP roundtrip：POST → GET → 终态）
 - [ ] GREEN → gates → Commit `feat: agent-sdk HTTP API`
 
@@ -43,6 +44,12 @@ transport/environment/purge 四模块；全部 Protocol 桩签名不变、只加
 **Interfaces:** `GET /runs/{id}/events/stream` → SSE 长连接推送 RuntimeEvent
 - [ ] RED：`test_event_stream_sse`（客户端收到 ≥1 事件）
 - [ ] GREEN → gates → Commit `feat: SSE event stream`
+
+> **Ruling（V5 终评审，2026-11-12）：Task 2 SSE 流端点有意推迟。**
+> 交付了轮询替代（`GET /runs/{id}/events` JSON 全量）；submit 已改为
+> 提交-轮询语义（立即 QUEUED）。SSE 长连接需要 aiohttp 流式响应 +
+> 背压/断连语义设计，放行到 V6（实时层与 Realtime 接入点一起做）。
+> 终评审 H3：计划与交付一致性修订。
 
 ### Task 3: explore 端点
 **Files:** Modify `api.py`；Test 追加

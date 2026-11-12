@@ -105,7 +105,11 @@ async def purge_memory(
     *,
     reason: str,
 ) -> PurgeAuditEvent:
-    """物理清除一条记忆（全 revision）并记录审计事件。"""
+    """物理清除一条记忆（全 revision）并记录审计事件。
+
+    跨库无事务：删除已不可逆，审计失败必须显式暴露（重试一次后抛出，
+    注明已发生无审计删除）——绝不静默吞掉审计缺口。
+    """
     deleted = await store.delete(namespace, record_id)
     event = PurgeAuditEvent(
         record_id=record_id,
@@ -113,5 +117,14 @@ async def purge_memory(
         deleted_revisions=deleted,
         reason=reason,
     )
-    await auditor.append(event)
+    try:
+        await auditor.append(event)
+    except Exception:
+        try:
+            await auditor.append(event)  # 重试一次（瞬时 sqlite 锁等）
+        except Exception as e:
+            raise RuntimeError(
+                f"记忆 {record_id} 已物理删除（{deleted} 版）但审计写入失败"
+                f"（{e}）——需人工补录审计"
+            ) from e
     return event

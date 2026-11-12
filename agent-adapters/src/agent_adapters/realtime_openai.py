@@ -34,7 +34,7 @@ class OpenAIRealtimeAdapter:
             )
         self.model = model
         self._endpoint = endpoint or _DEFAULT_ENDPOINT
-        self._api_key = key
+        # key 只传给内层 adapter，不再冗余持有（最小化密钥拷贝面）
         self._inner = RealtimeSessionAdapter(
             endpoint=self._endpoint, api_key=key
         )
