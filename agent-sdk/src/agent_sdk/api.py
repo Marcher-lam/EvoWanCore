@@ -23,6 +23,7 @@ from agent_sdk.models import (
     EventResponse,
     ExploreResponse,
     PurgeResponse,
+    ResumeRunRequest,
     RunStatusResponse,
     SubmitRunRequest,
 )
@@ -177,6 +178,31 @@ class AgentSDKServer:
             except (ConnectionResetError, ConnectionError, RuntimeError):
                 pass  # 客户端断连：干净退出，不吞服务端其他错误语义
             return resp
+
+        @routes.post("/runs/{run_id}/resume")
+        async def resume_run(request: web.Request) -> web.Response:
+            """恢复非终态 run（crash/中断后）；image_urls 注入协议见 ResumeRunRequest。"""
+            run_id = request.match_info["run_id"]
+            runtime = self._components["runtime"]
+            if await runtime.load_run(run_id) is None:
+                return web.json_response({"error": "run not found"}, status=404)
+            body = ResumeRunRequest(**await request.json())
+            from agent_core.run import IllegalTransition
+
+            try:
+                run = await runtime.resume(
+                    run_id,
+                    image_urls=body.image_urls or None,
+                )
+            except IllegalTransition as e:
+                return web.json_response(
+                    {"error": f"run not resumable: {e}"}, status=409
+                )
+            return web.json_response(
+                RunStatusResponse(
+                    run_id=run.id, state=run.state.value, task_id=run.task_id
+                ).model_dump()
+            )
 
         @routes.post("/runs/{run_id}/cancel")
         async def cancel_run(request: web.Request) -> web.Response:

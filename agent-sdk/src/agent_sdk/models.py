@@ -46,6 +46,16 @@ class PurgeResponse(BaseModel):
     reason: str
 
 
+class ResumeRunRequest(BaseModel):
+    """resume 注入协议：doc_id → image URL（corpus 在 caller 侧，内核只存引用）。
+
+    vision 任务恢复时，内核用 image_urls[checkpoint.image_doc_id] 重建
+    constraints.image_url；无映射则保留标记降级。
+    """
+
+    image_urls: dict[str, str] = {}
+
+
 class ExploreResponse(BaseModel):
     waves_executed: int = 0
     tasks_executed: int = 0
