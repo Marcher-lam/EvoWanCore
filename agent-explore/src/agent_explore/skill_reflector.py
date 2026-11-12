@@ -159,7 +159,9 @@ class SkillReflector:
                     "string in argv[1] (NOT stdin). Output ONLY JSON: "
                     '{"skill": {"skill_id", "version", "description", "entrypoint", '
                     '"expected_outputs", "known_failure_scenarios", "script_files"}}. '
-                    "The script runs in a network-denied subprocess; only stdlib."
+                    "The script runs in a network-denied subprocess; only stdlib. "
+                    "CRITICAL: the skill must work for ANY document of this type "
+                    "(not just the one in the trace) — no hard-coded doc_ids."
                 ),
             },
             {
