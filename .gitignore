@@ -8,3 +8,5 @@ __pycache__/
 .venv/
 reports/
 .env
+node_modules/
+agent-sdk-ts/dist/
