@@ -163,6 +163,29 @@ class AgentRuntime:
         await self._store.save_checkpoint(run.id, state)
 
     async def submit(self, task: TaskSpec, agent: AgentSpec) -> RunHandle:
+        run, context = await self._prepare_run(task, agent)
+        await self._execution_loop(run, agent, context)
+        return await self._finish_run(run)
+
+    async def submit_bg(
+        self, task: TaskSpec, agent: AgentSpec
+    ) -> tuple[str, asyncio.Task]:
+        """非阻塞提交：同步完成建 run（QUEUED/RUNING 落盘）即返回 run_id。
+
+        执行在后台 task 中继续；调用方持有 task 引用可等待/观察异常。
+        """
+        run, context = await self._prepare_run(task, agent)
+
+        async def _execute() -> RunHandle:
+            await self._execution_loop(run, agent, context)
+            return await self._finish_run(run)
+
+        bg = asyncio.create_task(_execute())
+        return run.id, bg
+
+    async def _prepare_run(
+        self, task: TaskSpec, agent: AgentSpec
+    ) -> tuple[RunHandle, dict]:
         task_handle = TaskHandle(id=f"task_{task.id}", spec_id=task.id, assigned_agent=agent.id)
         await self._store.save_task(task_handle)
         run = RunHandle(task_id=task_handle.id, agent_id=agent.id)
@@ -184,8 +207,7 @@ class AgentRuntime:
             "pending": [],
         }
         await self._save_checkpoint(run, context)
-        await self._execution_loop(run, agent, context)
-        return await self._finish_run(run)
+        return run, context
 
     async def _execution_loop(self, run: RunHandle, agent: AgentSpec, context: dict) -> None:
         policy = self._execution_policy or ModelLoopPolicy(gateway=self._gateway, agent=agent)
@@ -362,6 +384,10 @@ class AgentRuntime:
             await self._save(run, old, run.state)
 
     async def _load(self, run_id: str) -> RunHandle:
+        return await self._store.load_run(run_id)
+
+    async def load_run(self, run_id: str) -> RunHandle | None:
+        """公有读取（外部消费免触私有成员）；不存在返回 None。"""
         return await self._store.load_run(run_id)
 
     async def resume(
