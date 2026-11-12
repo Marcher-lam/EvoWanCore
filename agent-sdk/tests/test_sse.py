@@ -341,3 +341,38 @@ async def test_sse_heartbeat_on_idle(tmp_path: Path) -> None:
     finally:
         block.set()
         await server.stop()
+
+
+async def test_sse_last_event_id_miss_replays_all(tmp_path: Path) -> None:
+    """V7 终评审 F2：未命中（过期/伪造 id）→ 全量重放（documented 语义钉住）。"""
+    server = AgentSDKServer(_make_app_factory(tmp_path))  # port=0
+    await server.start()
+    try:
+        async with ClientSession() as client:
+            async with client.post(f"{server.url}/runs", json={
+                "task_id": "sse-miss", "kind": "test", "goal": {},
+                "acceptance_criteria": [{"check": "done"}],
+            }) as resp:
+                run_id = (await resp.json())["run_id"]
+            for _ in range(250):
+                async with client.get(f"{server.url}/runs/{run_id}") as r:
+                    if (await r.json())["state"] == "succeeded":
+                        break
+                await asyncio.sleep(0.02)
+
+            full, _ = await _read_stream(
+                client, f"{server.url}/runs/{run_id}/events/stream"
+            )
+            assert len(full) >= 3
+            missed, saw_end = await _read_stream(
+                client, f"{server.url}/runs/{run_id}/events/stream",
+                headers={"Last-Event-ID": "ev_does_not_exist"},
+            )
+            assert saw_end
+            assert [e["id"] for e in missed] == [e["id"] for e in full], \
+                "未命中 → 从头全量重放（无事件空洞）"
+            assert saw_end
+            assert [e["id"] for e in missed] == [e["id"] for e in full], \
+                "未命中 → 从头全量重放（无事件空洞）"
+    finally:
+        await server.stop()

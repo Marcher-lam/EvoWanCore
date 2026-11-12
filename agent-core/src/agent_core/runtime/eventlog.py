@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_events_correlation ON events(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_events_correlation_seq ON events(correlation_id, seq);
 """
 
 
@@ -32,6 +33,10 @@ class EventLog(Protocol):
     async def append(self, event: RuntimeEvent) -> None: ...
 
     def iter_events(self, correlation_id: str | None = None) -> AsyncIterator[RuntimeEvent]: ...
+
+    def iter_events_with_seq(
+        self, correlation_id: str, after_seq: int = -1
+    ) -> AsyncIterator[tuple[int, RuntimeEvent]]: ...
 
 
 class SqliteEventLog:

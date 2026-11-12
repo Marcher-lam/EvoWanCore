@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hmac
 import inspect
 import uuid
 from collections import deque
@@ -104,9 +105,11 @@ class InboundA2AHandler:
         async def _a2a(request: web.Request) -> web.Response:
             if self._auth_token is not None:
                 auth = request.headers.get("Authorization", "")
-                if auth != f"Bearer {self._auth_token}":
+                expected = f"Bearer {self._auth_token}"
+                if not hmac.compare_digest(auth.encode(), expected.encode()):
                     return web.json_response(
-                        {"error": "unauthorized"}, status=401
+                        {"error": "unauthorized"}, status=401,
+                        headers={"WWW-Authenticate": "Bearer"},
                     )
             try:
                 envelope = A2AEnvelope(**await request.json())
@@ -136,7 +139,9 @@ class InboundA2AHandler:
         # V7-T3：port=0 → 回读实际端口
         if self._port == 0:
             addresses = self._runner.addresses
-            self._port = addresses[0][1] if addresses else self._port
+            if not addresses:
+                raise RuntimeError("inbound 未监听任何地址——端口回读失败")
+            self._port = addresses[0][1]
 
     @property
     def port(self) -> int:

@@ -365,6 +365,10 @@ class AgentRuntime:
             cancel_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancel_wait  # reap：不留未收口的 cancelled 任务
+            # reap 窗口内外层取消到达会被 suppress 吞掉——检测并传播
+            # （否则 cancel 请求被无视，run 继续执行：正是 T1 要消灭的类别）
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             return dispatch_task.result()
         # 取消先到：回执未回 → OUTCOME_UNKNOWN；后台任务结果到达后被丢弃
         dispatch_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)

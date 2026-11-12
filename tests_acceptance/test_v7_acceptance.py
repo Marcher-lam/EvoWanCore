@@ -258,11 +258,13 @@ async def test_v7_realtime_protocol_over_mock() -> None:
         )
         sid = await adapter.open_session(instructions="v7 验收")
         await adapter.send_text(sid, "ping")
-        async for event in adapter.stream(sid):
-            if event.type == "transcript_out" and "ack: ping" in str(event.payload):
-                break
-        else:
-            raise AssertionError("echo 未到达")
+        got_ack = False
+        async with asyncio.timeout(5):
+            async for event in adapter.stream(sid):
+                if event.type == "transcript_out" and "ack: ping" in str(event.payload):
+                    got_ack = True
+                    break
+        assert got_ack, "echo 未到达"
         await adapter.close_session(sid)
         assert auth_seen == ["Bearer sk-v7"], "Bearer 头必须在 WebSocket 握手携带"
     finally:

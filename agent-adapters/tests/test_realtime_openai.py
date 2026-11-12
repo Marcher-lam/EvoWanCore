@@ -1,5 +1,7 @@
 """T11 OpenAI Realtime 接入点：key 解析 + 明确缺失提示 + 会话骨架。"""
 
+import asyncio
+
 import pytest
 
 
@@ -111,13 +113,14 @@ async def test_realtime_skeleton_over_mock_socket(monkeypatch) -> None:
         await adapter.send_text(sid, "hello")
 
         got_in = got_out = False
-        async for event in adapter.stream(sid):
-            if event.type == "transcript_in" and event.payload.get("text") == "hello":
-                got_in = True
-            if event.type == "transcript_out" and event.payload.get("text") == "echo: hello":
-                got_out = True
-            if got_in and got_out:
-                break
+        async with asyncio.timeout(5):
+            async for event in adapter.stream(sid):
+                if event.type == "transcript_in" and event.payload.get("text") == "hello":
+                    got_in = True
+                if event.type == "transcript_out" and event.payload.get("text") == "echo: hello":
+                    got_out = True
+                if got_in and got_out:
+                    break
         assert got_in and got_out, f"echo 链路未闭环: in={got_in} out={got_out}"
 
         await adapter.close_session(sid)

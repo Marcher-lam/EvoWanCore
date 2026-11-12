@@ -146,9 +146,16 @@ class AgentSDKServer:
             await resp.prepare(request)
 
             terminal = {"succeeded", "failed", "cancelled"}
+            # Last-Event-ID 预扫定位（不发送）：命中 → 游标直接跳到断点；
+            # 未命中（过期/伪造）→ 保持 -1 全量重放（沿用 documented 语义，
+            # 此时 sent_ids 承担跨轮去重，miss 场景 O(n²) 可接受——客户端 bug 罕见路径）
             last_seq = -1
-            sent_ids: set[str] = set()
-            suppress_until_hit = last_event_id is not None  # 断点及之前全抑制
+            if last_event_id is not None:
+                async for seq, e in runtime.events_with_seq(run_id, -1):
+                    if e.id == last_event_id:
+                        last_seq = seq
+                        break
+            sent_ids: set[str] = set()  # 仅 miss 全量重放路径需要（增量路径游标已保证唯一）
             quiet_rounds = 0  # 终态后的静默确认拍数（防状态先落盘、尾事件后到的竞态）
             last_write = asyncio.get_running_loop().time()
             try:
@@ -156,10 +163,6 @@ class AgentSDKServer:
                     emitted = 0
                     async for seq, e in runtime.events_with_seq(run_id, last_seq):
                         last_seq = max(last_seq, seq)
-                        if suppress_until_hit:
-                            if e.id == last_event_id:
-                                suppress_until_hit = False  # 命中：其后开始发送
-                            continue
                         if e.id in sent_ids:
                             continue
                         payload = EventResponse(
@@ -176,10 +179,6 @@ class AgentSDKServer:
                         sent_ids.add(e.id)
                         emitted += 1
                         last_write = asyncio.get_running_loop().time()
-                    # Last-Event-ID 未命中（过期/伪造）：首轮全扫已推进游标——
-                    # 历史不再补发，仅推后续新事件（documented）
-                    if suppress_until_hit and last_seq != -1:
-                        suppress_until_hit = False
                     run = await runtime.load_run(run_id)
                     if run is not None and run.state.value in terminal:
                         # 终态 ≠ 已排空：状态先落盘、RunStateChanged/RunVerified
@@ -316,7 +315,9 @@ class AgentSDKServer:
         # V7-T3：port=0 → 回读内核分配的临时端口（CI 并行免碰撞）
         if self._port == 0:
             addresses = self._runner.addresses
-            self._port = addresses[0][1] if addresses else self._port
+            if not addresses:
+                raise RuntimeError("server 未监听任何地址——端口回读失败")
+            self._port = addresses[0][1]
 
     async def stop(self) -> None:
         # 等后台 run 收口（有界：运行中的任务由 runtime 自身终态化）
