@@ -43,10 +43,11 @@ class AgentSDKServer:
     """HTTP API 服务器——工厂函数返回含 runtime 等组件的字典。"""
 
     def __init__(self, app_factory: AppFactory, host: str = "127.0.0.1",
-                 port: int = 8300) -> None:
+                 port: int = 8300, sse_poll_s: float = 0.05) -> None:
         self._factory = app_factory
         self._host = host
         self._port = port
+        self._sse_poll_s = sse_poll_s
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None
         self._bg: set[asyncio.Task] = set()  # 强引用防 GC
@@ -113,6 +114,69 @@ class AgentSDKServer:
                     payload=e.payload,
                 ).model_dump())
             return web.json_response({"events": events, "count": len(events)})
+
+        @routes.get("/runs/{run_id}/events/stream")
+        async def stream_events(request: web.Request) -> web.StreamResponse:
+            """SSE：重放已有事件 → 增量推送 → 终态排空后 event: end 关闭。
+
+            语义：背压依赖 StreamResponse.write 等待对端排空（有界写缓冲）；
+            客户端断连 → write 抛 ConnectionError → 干净退出；
+            Last-Event-ID 头 = 断线重连游标（只发该 id 之后的事件）。
+            """
+            run_id = request.match_info["run_id"]
+            runtime = self._components["runtime"]
+            if await runtime.load_run(run_id) is None:
+                return web.json_response({"error": "run not found"}, status=404)
+            last_event_id = request.headers.get("Last-Event-ID")
+
+            resp = web.StreamResponse(headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            })
+            await resp.prepare(request)
+
+            sent_ids: set[str] = set()
+            terminal = {"succeeded", "failed", "cancelled"}
+            try:
+                while True:
+                    events = [e async for e in runtime.events(run_id)]
+                    if last_event_id is not None and not sent_ids:
+                        ids = [e.id for e in events]
+                        if last_event_id in ids:
+                            # 游标命中：断点及之前全部标记已发
+                            for e in events[: ids.index(last_event_id) + 1]:
+                                sent_ids.add(e.id)
+                    emitted = 0
+                    for e in events:
+                        if e.id in sent_ids:
+                            continue
+                        payload = EventResponse(
+                            id=e.id, type=e.type, ts=e.ts.isoformat(),
+                            subject_type=e.subject_type, subject_id=e.subject_id,
+                            payload=e.payload,
+                        ).model_dump()
+                        await resp.write(
+                            (
+                                f"id: {payload['id']}\n"
+                                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                            ).encode()
+                        )
+                        sent_ids.add(e.id)
+                        emitted += 1
+                    run = await runtime.load_run(run_id)
+                    if (
+                        run is not None
+                        and run.state.value in terminal
+                        and emitted == 0
+                    ):
+                        break  # 终态且已排空
+                    await asyncio.sleep(self._sse_poll_s)
+                await resp.write(b"event: end\ndata: {}\n\n")
+                await resp.write_eof()
+            except (ConnectionResetError, ConnectionError, RuntimeError):
+                pass  # 客户端断连：干净退出，不吞服务端其他错误语义
+            return resp
 
         @routes.post("/runs/{run_id}/cancel")
         async def cancel_run(request: web.Request) -> web.Response:
