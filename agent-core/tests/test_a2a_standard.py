@@ -148,3 +148,77 @@ async def test_bad_json_parse_error() -> None:
         assert body["error"]["code"] == -32700
     finally:
         await ep.stop()
+
+
+# ---------- V9-T1: Notification 严格语义（无 id 不回包） ----------
+
+async def test_notification_no_id_no_response() -> None:
+    """无 id 的 message/send = Notification：副作用执行，HTTP 204 无 body。"""
+    from agent_core.a2a_standard import A2AStandardEndpoint
+
+    handled: list[A2AEnvelope] = []
+
+    async def handler(env: A2AEnvelope) -> A2AEnvelope | None:
+        handled.append(env)
+        return A2AEnvelope(
+            from_agent=env.to_agent, to_agent=env.from_agent,
+            message_type="reply", payload={"text": "ignored"},
+        )
+
+    ep = A2AStandardEndpoint(_card(), handler, port=0)
+    await ep.start()
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"http://127.0.0.1:{ep.port}/",
+                json={
+                    "jsonrpc": "2.0",  # 无 id
+                    "method": "message/send",
+                    "params": {"message": {
+                        "kind": "message", "role": "user",
+                        "parts": [{"kind": "text", "text": "fire and forget"}],
+                    }},
+                },
+            ) as resp:
+                assert resp.status == 204, "Notification 必须不回包"
+                assert await resp.read() == b"", "204 必须无 body"
+        assert len(handled) == 1, "副作用必须照常执行"
+        assert handled[0].payload["text"] == "fire and forget"
+    finally:
+        await ep.stop()
+
+
+async def test_notification_error_also_silent() -> None:
+    """Notification 的 method not found 同样 204（JSON-RPC：错误也不回包）。"""
+    from agent_core.a2a_standard import A2AStandardEndpoint
+
+    async def handler(env):
+        return None
+
+    ep = A2AStandardEndpoint(_card(), handler, port=0)
+    await ep.start()
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"http://127.0.0.1:{ep.port}/",
+                json={"jsonrpc": "2.0", "method": "tasks/get", "params": {}},
+            ) as resp:
+                assert resp.status == 204
+    finally:
+        await ep.stop()
+
+
+async def test_client_notify_text() -> None:
+    """A2AStandardClient.notifyText：期望 204，返回 None。"""
+    from agent_core.a2a_standard import A2AStandardClient, A2AStandardEndpoint
+
+    async def handler(env):
+        return None  # handler 无回复（Notification 场景合理）
+
+    ep = A2AStandardEndpoint(_card(), handler, port=0)
+    await ep.start()
+    try:
+        client = A2AStandardClient(f"http://127.0.0.1:{ep.port}")
+        assert await client.notify_text("one-way") is None
+    finally:
+        await ep.stop()

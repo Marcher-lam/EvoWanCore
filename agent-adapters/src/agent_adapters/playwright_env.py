@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from typing import Any
+from typing import Any, Literal
 
 
 class BrowserUnavailable(RuntimeError):
@@ -57,33 +57,108 @@ class PlaywrightEnvironmentAdapter:
         await self._ensure()
         await self._page.goto(url)
 
-    async def observe(self) -> dict:
-        """DOM 快照（可读性文本）+ PNG 截图 data URL。"""
+    _SHADOW_TEXT_JS = """
+    () => {
+      const out = [];
+      for (const el of document.querySelectorAll('*')) {
+        if (el.shadowRoot) {
+          // ShadowRoot 是 DocumentFragment——没有 innerText，用 textContent
+          const t = el.shadowRoot.textContent || '';
+          if (t.trim()) out.push(t.trim());
+        }
+      }
+      return out.join('\\n');
+    }
+    """
+
+    async def _dom_text(self) -> str:
+        """主 + 子 frame + open shadow 树的可读性文本。"""
+        chunks: list[str] = []
+        for frame in self._page.frames:
+            try:
+                text: str = await frame.inner_text("body")
+            except Exception:  # noqa: BLE001 — 无 body / 未就绪 frame → 跳过
+                continue
+            if text.strip():
+                chunks.append(text.strip())
+            try:
+                shadow: str = await frame.evaluate(self._SHADOW_TEXT_JS)
+            except Exception:  # noqa: BLE001 — evaluate 不可用 → 跳过
+                continue
+            if shadow.strip():
+                chunks.append(shadow.strip())
+        return "\n".join(chunks)
+
+    async def _resolve(self, target: str):
+        """目标解析：主 frame 优先，未命中遍历子 frame（iframe 内元素可定位）。
+
+        open shadow DOM 由 Playwright CSS 引擎原生穿透，无需特判。
+        返回 Locator 或 None（全部 frame 未命中）。
+        """
+        main = self._page.locator(target)
+        if await main.count() > 0:
+            return main
+        for frame in self._page.frames:
+            if frame is self._page.main_frame:
+                continue
+            loc = frame.locator(target)
+            if await loc.count() > 0:
+                return loc
+        return None
+
+    async def observe(
+        self, settle: Literal["networkidle"] | None = None
+    ) -> dict:
+        """DOM 快照（主+子 frame + open shadow 树文本）+ PNG 截图 data URL。
+
+        settle：可选等待——"networkidle" 等网络静默（懒加载站点），
+        None（默认）不额外等待；其他值 raise（typo 不静默失效）。
+        返回 dict 附 settled 标志（settle 请求是否真正静默完成）。
+        """
         await self._ensure()
-        try:
-            dom: str = await self._page.inner_text("body")
-        except Exception:  # noqa: BLE001 — 无 body 页面 → 空 DOM 不炸会话
-            dom = ""
+        settled = settle is None  # 不等待 → 视为已定
+        if settle == "networkidle":
+            try:
+                await self._page.wait_for_load_state(
+                    "networkidle", timeout=10_000
+                )
+                settled = True
+            except TimeoutError as e:  # 收窄：只吞超时（页面永不静默→降级）
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "networkidle 10s 未静默，降级取当前状态: %s", e
+                )
+        elif settle is not None:
+            raise ValueError(f"未知 settle 模式: {settle!r}（仅支持 networkidle）")
+        dom = await self._dom_text()
         png: bytes = await self._page.screenshot()
         return {
             "dom": dom,
+            "settled": settled,
             "screenshot_url": (
                 "data:image/png;base64," + base64.b64encode(png).decode()
             ),
         }
 
     async def act(self, action: dict) -> dict:
-        """真执行：click/type/scroll/screenshot。"""
+        """真执行：click/type/scroll/screenshot（目标穿透 iframe）。"""
         await self._ensure()
         kind = action.get("action", "")
         target = action.get("target", "")
         try:
-            if kind == "click":
-                await self._page.click(target)
-                return {"ok": True, "clicked": target}
-            if kind == "type":
-                await self._page.fill(target, action.get("text", ""))
-                value = await self._page.input_value(target)
+            if kind in ("click", "type"):
+                loc = await self._resolve(target)
+                if loc is None:
+                    return {
+                        "ok": False,
+                        "error": f"target not found in any frame: {target}",
+                    }
+                if kind == "click":
+                    await loc.click()
+                    return {"ok": True, "clicked": target}
+                await loc.fill(action.get("text", ""))
+                value = await loc.input_value()
                 return {"ok": True, "typed": action.get("text", ""), "value": value}
             if kind == "scroll":
                 # scroll 相对当前视口（target 参数仅作语义提示，不参与定位）
