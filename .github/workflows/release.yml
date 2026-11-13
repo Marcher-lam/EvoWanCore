@@ -1,0 +1,54 @@
+name: release
+
+on:
+  workflow_dispatch: {}  # 手动触发——发布是外向动作，不做自动发版
+  # push:
+  #   tags: ["v*"]  # 未来启用 tag 触发时取消注释
+
+jobs:
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Python 构建校验（各包 sdist + wheel；root 是 virtual workspace 不发）
+        run: |
+          uv sync
+          uv build --package agent-core --package agent-sdk --package agent-adapters --package agent-explore --package agent-evolve
+          ls -la dist/
+
+      - name: TS 构建校验（tsc + npm pack 干跑）
+        working-directory: agent-sdk-ts
+        run: |
+          npm install
+          npx tsc -p tsconfig.json
+          npm pack --dry-run
+
+  # publish 步骤占位——需要凭据后取消注释并配置 secrets：
+  #   PYPI_API_TOKEN → secret, NPM_TOKEN → secret
+  # publish-pypi:
+  #   needs: build-check
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: astral-sh/setup-uv@v5
+  #     - run: uv publish --token ${{ secrets.PYPI_API_TOKEN }}
+  # publish-npm:
+  #   needs: build-check
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 22, registry-url: https://registry.npmjs.org }
+  #     - working-directory: agent-sdk-ts
+  #       run: |
+  #         npm install
+  #         npx tsc -p tsconfig.json
+  #         npm publish --access public
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

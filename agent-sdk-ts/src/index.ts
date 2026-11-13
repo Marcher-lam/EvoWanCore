@@ -12,6 +12,8 @@ import {
 } from "./types.js";
 
 export interface ClientOptions {
+  /** bearer token：设置后所有请求带 Authorization: Bearer <token>。 */
+  authToken?: string;
   /**
    * fetch 实现（默认全局 fetch）。连接复用说明：
    * - Node >= 18：全局 fetch 基于 undici，默认走连接池（keep-alive），
@@ -26,10 +28,14 @@ export interface ClientOptions {
 export class AgentSDKClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly authHeaders: Record<string, string>;
 
   constructor(baseUrl: string, opts: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = opts.fetch ?? fetch;
+    this.authHeaders = opts.authToken
+      ? { Authorization: `Bearer ${opts.authToken}` }
+      : {};
   }
 
   /** 提交任务 → 立即返回 QUEUED（提交-轮询模型）。 */
@@ -108,6 +114,7 @@ export class AgentSDKClient {
   ): Promise<void> {
     const headers: Record<string, string> = {
       Accept: "text/event-stream",
+      ...this.authHeaders,
     };
     if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
     // 连接建立 30s 超时（流本身长期打开，不受此限）；可被 signal 中止
@@ -164,7 +171,10 @@ export class AgentSDKClient {
   ): Promise<T> {
     const resp = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
-      headers: body !== undefined ? { "Content-Type": "application/json" } : {},
+      headers: {
+        ...this.authHeaders,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),  // 单请求上限（防挂死轮询）
     });
