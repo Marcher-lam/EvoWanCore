@@ -5,24 +5,46 @@ on:
   # push:
   #   tags: ["v*"]  # 未来启用 tag 触发时取消注释
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # 发布校验不互相打断
+
 jobs:
   build-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装 uv
-        uses: astral-sh/setup-uv@v5
+        # 第三方 action pin 到完整 commit SHA（v5 tag 指向），防 tag 劫持
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
-      - name: Python 构建校验（各包 sdist + wheel；root 是 virtual workspace 不发）
+      - name: Python 构建校验
         run: |
           uv sync --locked
-          for pkg in agent-core agent-sdk agent-adapters agent-explore agent-evolve; do
-            uv build --package "$pkg"
-          done
+          # 覆盖全部 workspace 成员（新增包自动纳入校验）；
+          # root 是 virtual workspace 不可整仓构建
+          uv build --all-packages
           ls -la dist/
+
+      - name: 上传构建产物（publish 占位任务的交接物）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 安装 Node 22（与 ci.yml ts job 同版本——构建输入不漂移）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-sdk-ts/package-lock.json
 
       - name: TS 构建校验（tsc + npm pack 干跑）
         working-directory: agent-sdk-ts
@@ -37,8 +59,9 @@ jobs:
   #   needs: build-check
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: astral-sh/setup-uv@v5
+  #     - uses: actions/download-artifact@v4
+  #       with: { name: dist, path: dist }
+  #     - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
   #     - run: uv publish --token ${{ secrets.PYPI_API_TOKEN }}
   # publish-npm:
   #   needs: build-check
@@ -49,7 +72,7 @@ jobs:
   #       with: { node-version: 22, registry-url: https://registry.npmjs.org }
   #     - working-directory: agent-sdk-ts
   #       run: |
-  #         npm install
+  #         npm ci
   #         npx tsc -p tsconfig.json
   #         npm publish --access public
   #       env:

@@ -33,8 +33,17 @@ export class AgentSDKClient {
   constructor(baseUrl: string, opts: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = opts.fetch ?? fetch;
-    this.authHeaders = opts.authToken
-      ? { Authorization: `Bearer ${opts.authToken}` }
+    // fail-fast：空串/空白静默跳过鉴权、控制字符（env 尾换行）被 fetch
+    // 拒头——都在构造期报，对齐 Python 端 ValueError 行为
+    const token = opts.authToken?.trim();
+    if (opts.authToken !== undefined && !token) {
+      throw new Error("authToken 不能为空串/空白（将静默跳过鉴权）");
+    }
+    if (token && /[\u0000-\u001f\u007f]/.test(token)) {
+      throw new Error("authToken 含控制字符（如尾部换行），fetch 会拒绝该头部");
+    }
+    this.authHeaders = token
+      ? { Authorization: `Bearer ${token}` }
       : {};
   }
 

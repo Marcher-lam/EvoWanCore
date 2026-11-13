@@ -1,6 +1,7 @@
 """TS SDK 冒烟服务端：最小工厂起 AgentSDKServer，stdout 打印 READY <url>。"""
 
 import asyncio
+import os
 import shutil
 import sys
 import tempfile
@@ -76,7 +77,10 @@ async def main() -> None:
         agent = AgentSpec(id="default", role="worker", model_id="m-ts")
         return {"runtime": runtime, "agents": {"default": agent}, "app": None}
 
-    server = AgentSDKServer(factory, port=0)  # 动态端口
+    # 冒烟默认启用鉴权——顺带覆盖 TS authToken 全路径（OCR test 项）
+    server = AgentSDKServer(
+        factory, port=0, auth_token=os.environ.get("SMOKE_AUTH_TOKEN"),
+    )
     await server.start()
     print(f"READY {server.url}", flush=True)
     try:

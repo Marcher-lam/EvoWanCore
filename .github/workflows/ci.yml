@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
 
+# PR 会执行外部代码（ruff/pytest 跑 PR 作者的测试）——GITHUB_TOKEN 最小权限
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -12,11 +16,13 @@ concurrency:
 jobs:
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # 真 chromium + 全量 pytest——挂死不吃 6h 平台上限
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装 uv
-        uses: astral-sh/setup-uv@v5
+        # 第三方 action pin 到完整 commit SHA（v5 tag 指向），防 tag 劫持
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -27,7 +33,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}
+          # 键随 uv.lock（含 playwright 版本）变——浏览器升级后缓存自然失效
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: playwright-chromium-${{ runner.os }}-
 
       - name: 安装 chromium（真浏览器 CUA 测试）
         run: uv run playwright install --with-deps chromium
@@ -35,16 +43,17 @@ jobs:
       - name: Lint（ruff）
         run: uv run ruff check .
 
-      - name: 全量测试（349+，含真 chromium / A2A / SSE / resume）
+      - name: 全量测试（354+，含真 chromium / A2A / SSE / resume）
         run: uv run pytest -q
 
   ts:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装 uv（smoke 需要 Python server）
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -66,6 +75,6 @@ jobs:
         working-directory: agent-sdk-ts
         run: npx tsc -p tsconfig.json
 
-      - name: 冒烟 e2e（对真 Python server）
+      - name: 冒烟 e2e（对真 Python server，含鉴权往返）
         working-directory: agent-sdk-ts
         run: node smoke/run.mjs
