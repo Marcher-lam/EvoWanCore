@@ -76,6 +76,8 @@ class AgentSDKServer:
         self._port = port
         self._sse_poll_s = sse_poll_s
         self._sse_heartbeat_s = sse_heartbeat_s
+        if auth_token is not None and not auth_token:
+            raise ValueError("auth_token 不能为空串（会全站恒 401）")
         self._auth_token = auth_token
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None

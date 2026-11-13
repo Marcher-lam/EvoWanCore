@@ -254,6 +254,9 @@ async def test_sdk_auth_rejects_missing_or_wrong_token(tmp_path: Path) -> None:
                 f"{server.url}/runs/x", headers={"Authorization": "Bearer wrong"},
             ) as resp:
                 assert resp.status == 401
+            # 鉴权在路由之外：无凭证打不存在路径 → 401（而非 404 泄漏路由面）
+            async with client.get(f"{server.url}/definitely/not/a/route") as resp:
+                assert resp.status == 401
     finally:
         await server.stop()
 

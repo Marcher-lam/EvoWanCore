@@ -17,7 +17,7 @@
 | `agent-devtools` | 开发工具 |
 | `examples/docworkbench` | 北极星应用：VLM 文档工作台（27b 北极星 1.000 的载体） |
 | `agent-sdk-ts` | TypeScript 客户端 SDK（零运行时依赖，fetch + SSE + authToken） |
-| `tests_acceptance` | V2-V10 验收套件（每版一文件） |
+| `tests_acceptance` | 验收套件（v2/v3/v5/v6/v7/v8 各一文件；v9/v10 追加在 v8 文件内；v4 无独立验收——复用 v3 门禁） |
 
 ## 2. 协议实现对照（reserved.py 四桩全落地）
 

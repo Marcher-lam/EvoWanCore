@@ -295,13 +295,16 @@ async def test_v10_sdk_server_auth_e2e(tmp_path) -> None:
             }, headers=h) as resp:
                 assert resp.status == 201
                 run_id = (await resp.json())["run_id"]
+            final_state = None
             for _ in range(250):
                 async with client.get(
                     f"{server.url}/runs/{run_id}", headers=h,
                 ) as r:
-                    if (await r.json())["state"] == "succeeded":
+                    final_state = (await r.json())["state"]
+                    if final_state in ("succeeded", "failed", "cancelled"):
                         break
                 await asyncio.sleep(0.02)
+            assert final_state == "succeeded", f"轮询超时/未成功: {final_state}"
             events = []
             async with client.get(
                 f"{server.url}/runs/{run_id}/events/stream",
@@ -333,6 +336,6 @@ def test_v10_ci_workflows_valid() -> None:
     ts_steps = " ".join(
         s.get("run", "") for s in ci["jobs"]["ts"]["steps"])
     assert "tsc" in ts_steps and "smoke/run.mjs" in ts_steps
-    assert "workflow_dispatch" in rel[True] or "workflow_dispatch" in rel[
-        "on"
-    ], "release 必须手动触发"
+    assert "workflow_dispatch" in (
+        rel.get(True) or rel.get("on") or {}
+    ), "release 必须手动触发"

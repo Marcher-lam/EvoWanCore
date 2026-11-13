@@ -18,14 +18,16 @@ jobs:
 
       - name: Python 构建校验（各包 sdist + wheel；root 是 virtual workspace 不发）
         run: |
-          uv sync
-          uv build --package agent-core --package agent-sdk --package agent-adapters --package agent-explore --package agent-evolve
+          uv sync --locked
+          for pkg in agent-core agent-sdk agent-adapters agent-explore agent-evolve; do
+            uv build --package "$pkg"
+          done
           ls -la dist/
 
       - name: TS 构建校验（tsc + npm pack 干跑）
         working-directory: agent-sdk-ts
         run: |
-          npm install
+          npm ci
           npx tsc -p tsconfig.json
           npm pack --dry-run
 

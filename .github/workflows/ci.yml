@@ -21,7 +21,13 @@ jobs:
           enable-cache: true
 
       - name: 安装依赖（root 依赖已带 agent-adapters[browser]）
-        run: uv sync
+        run: uv sync --locked
+
+      - name: 缓存 playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
 
       - name: 安装 chromium（真浏览器 CUA 测试）
         run: uv run playwright install --with-deps chromium
@@ -43,18 +49,18 @@ jobs:
           enable-cache: true
 
       - name: 安装 Python 依赖
-        run: uv sync
+        run: uv sync --locked
 
       - name: 安装 Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: agent-sdk-ts/package.json
+          cache-dependency-path: agent-sdk-ts/package-lock.json
 
-      - name: 安装 TS 依赖
+      - name: 安装 TS 依赖（锁文件精确安装）
         working-directory: agent-sdk-ts
-        run: npm install
+        run: npm ci
 
       - name: 类型检查 + 构建
         working-directory: agent-sdk-ts
