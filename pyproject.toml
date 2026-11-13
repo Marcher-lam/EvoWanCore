@@ -7,7 +7,7 @@ dependencies = [
     "agent-sdk",
     "agent-explore",
     "agent-evolve",
-    "agent-adapters",
+    "agent-adapters[browser]",
     "agent-devtools",
     "examples",
 ]
@@ -22,7 +22,12 @@ agent-devtools = { workspace = true }
 examples = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pyyaml",
+    "ruff>=0.8",
+]
 
 [tool.uv.workspace]
 members = ["agent-core", "agent-sdk", "agent-explore", "agent-evolve", "agent-adapters", "agent-devtools", "examples"]

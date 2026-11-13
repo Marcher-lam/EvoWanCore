@@ -259,3 +259,83 @@ async def test_v9_playwright_real_site_full_loop() -> None:
     finally:
         await adapter.aclose()
         await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# V10 追加：工程面收口（CI 就绪 / SDK 鉴权 e2e）
+# ---------------------------------------------------------------------------
+
+async def test_v10_sdk_server_auth_e2e(tmp_path) -> None:
+    """auth_token：全端点 401 拒无凭证；对 token submit→SSE 全链路。"""
+    import asyncio
+    from pathlib import Path
+
+    from agent_sdk.api import AgentSDKServer
+    from aiohttp import ClientSession, ClientTimeout
+
+    from tests_acceptance.test_v6_acceptance import _base_factory
+
+    tmp = Path(tmp_path)
+    server = AgentSDKServer(_base_factory(tmp, [
+        {"tool_calls": [{"id": "c", "name": "noop", "arguments": {}}]},
+        {"text": "done"},
+    ]), auth_token="v10key")
+    await server.start()
+    try:
+        async with ClientSession() as client:
+            async with client.post(f"{server.url}/runs", json={
+                "task_id": "v10", "kind": "test", "goal": {},
+                "acceptance_criteria": [{"check": "done"}],
+            }) as resp:
+                assert resp.status == 401, "无凭证必须 401"
+            h = {"Authorization": "Bearer v10key"}
+            async with client.post(f"{server.url}/runs", json={
+                "task_id": "v10", "kind": "test", "goal": {},
+                "acceptance_criteria": [{"check": "done"}],
+            }, headers=h) as resp:
+                assert resp.status == 201
+                run_id = (await resp.json())["run_id"]
+            final_state = None
+            for _ in range(250):
+                async with client.get(
+                    f"{server.url}/runs/{run_id}", headers=h,
+                ) as r:
+                    final_state = (await r.json())["state"]
+                    if final_state in ("succeeded", "failed", "cancelled"):
+                        break
+                await asyncio.sleep(0.02)
+            assert final_state == "succeeded", f"轮询超时/未成功: {final_state}"
+            events = []
+            async with client.get(
+                f"{server.url}/runs/{run_id}/events/stream",
+                headers={**h}, timeout=ClientTimeout(total=15),
+            ) as stream:
+                assert stream.status == 200
+                async for raw in stream.content:
+                    line = raw.decode().strip()
+                    if line.startswith("data:"):
+                        events.append(line)
+                    elif line.startswith("event:") and "end" in line:
+                        break
+            assert len(events) >= 3, "鉴权下 SSE 全链路必须通"
+    finally:
+        await server.stop()
+
+
+def test_v10_ci_workflows_valid() -> None:
+    """CI/release workflow：YAML 可解析 + 关键步骤在场。"""
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    rel = yaml.safe_load((root / ".github/workflows/release.yml").read_text())
+    assert "python" in ci["jobs"] and "ts" in ci["jobs"]
+    py_steps = " ".join(s.get("run", "") for s in ci["jobs"]["python"]["steps"])
+    assert "ruff check" in py_steps and "pytest" in py_steps
+    assert "playwright install" in py_steps, "CI 必须装真浏览器"
+    ts_steps = " ".join(
+        s.get("run", "") for s in ci["jobs"]["ts"]["steps"])
+    assert "tsc" in ts_steps and "smoke/run.mjs" in ts_steps
+    assert "workflow_dispatch" in (
+        rel.get(True) or rel.get("on") or {}
+    ), "release 必须手动触发"

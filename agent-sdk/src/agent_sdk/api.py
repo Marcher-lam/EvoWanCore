@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from collections.abc import Callable
 from typing import Any
@@ -40,17 +41,44 @@ async def _bad_request_guard(request: web.Request, handler):
         return web.json_response({"error": f"bad request: {e}"}, status=400)
 
 
+def _make_auth_guard(token: str):
+    """bearer 鉴权中间件（恒时比较；401 + WWW-Authenticate: Bearer）。"""
+
+    @web.middleware
+    async def _auth_guard(request: web.Request, handler):
+        auth = request.headers.get("Authorization", "")
+        expected = f"Bearer {token}"
+        try:
+            ok = hmac.compare_digest(
+                auth.encode("latin-1"), expected.encode("latin-1")
+            )
+        except (UnicodeEncodeError, ValueError):
+            ok = False  # 非 latin-1 头 → 拒绝
+        if not ok:
+            return web.json_response(
+                {"error": "unauthorized"}, status=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await handler(request)
+
+    return _auth_guard
+
+
 class AgentSDKServer:
     """HTTP API 服务器——工厂函数返回含 runtime 等组件的字典。"""
 
     def __init__(self, app_factory: AppFactory, host: str = "127.0.0.1",
                  port: int = 8300, sse_poll_s: float = 0.05,
-                 sse_heartbeat_s: float = 5.0) -> None:
+                 sse_heartbeat_s: float = 5.0,
+                 auth_token: str | None = None) -> None:
         self._factory = app_factory
         self._host = host
         self._port = port
         self._sse_poll_s = sse_poll_s
         self._sse_heartbeat_s = sse_heartbeat_s
+        if auth_token is not None and not auth_token:
+            raise ValueError("auth_token 不能为空串（会全站恒 401）")
+        self._auth_token = auth_token
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None
         self._bg: dict[str, asyncio.Task] = {}  # run_id → 后台任务（防双跑 + 防 GC）
@@ -306,7 +334,10 @@ class AgentSDKServer:
 
     async def start(self) -> None:
         self._components = self._factory()
-        app = web.Application(middlewares=[_bad_request_guard])
+        middlewares = [_bad_request_guard]
+        if self._auth_token is not None:  # 鉴权先于业务（含 400 解析）
+            middlewares.insert(0, _make_auth_guard(self._auth_token))
+        app = web.Application(middlewares=middlewares)
         app.add_routes(self._routes())
         self._runner = web.AppRunner(app)
         await self._runner.setup()

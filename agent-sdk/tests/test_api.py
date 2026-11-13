@@ -234,3 +234,74 @@ async def test_memory_purge_endpoint(tmp_path: Path) -> None:
                 assert resp.status == 503
     finally:
         await server2.stop()
+
+
+# ---------- V10-T2: SDK server bearer 鉴权 ----------
+
+async def test_sdk_auth_rejects_missing_or_wrong_token(tmp_path: Path) -> None:
+    """auth_token 设置：无凭证/错凭证 → 401 + WWW-Authenticate。"""
+    from agent_sdk.api import AgentSDKServer
+    from aiohttp import ClientSession
+
+    server = AgentSDKServer(_make_app_factory(tmp_path), auth_token="sdkkey")
+    await server.start()
+    try:
+        async with ClientSession() as client:
+            async with client.get(f"{server.url}/runs/x") as resp:
+                assert resp.status == 401
+                assert resp.headers.get("WWW-Authenticate") == "Bearer"
+            async with client.get(
+                f"{server.url}/runs/x", headers={"Authorization": "Bearer wrong"},
+            ) as resp:
+                assert resp.status == 401
+            # 鉴权在路由之外：无凭证打不存在路径 → 401（而非 404 泄漏路由面）
+            async with client.get(f"{server.url}/definitely/not/a/route") as resp:
+                assert resp.status == 401
+    finally:
+        await server.stop()
+
+
+async def test_sdk_auth_all_endpoints_with_token(tmp_path: Path) -> None:
+    """对 token：submit→轮询→events 全链路畅通。"""
+    from agent_sdk.api import AgentSDKServer
+    from aiohttp import ClientSession
+
+    server = AgentSDKServer(_make_app_factory(tmp_path), auth_token="sdkkey")
+    await server.start()
+    try:
+        async with ClientSession() as client:
+            h = {"Authorization": "Bearer sdkkey"}
+            async with client.post(f"{server.url}/runs", json={
+                "task_id": "auth1", "kind": "test", "goal": {},
+                "acceptance_criteria": [{"check": "done"}],
+            }, headers=h) as resp:
+                assert resp.status == 201
+                run_id = (await resp.json())["run_id"]
+            for _ in range(250):
+                async with client.get(
+                    f"{server.url}/runs/{run_id}", headers=h,
+                ) as r:
+                    if (await r.json())["state"] == "succeeded":
+                        break
+                await asyncio.sleep(0.02)
+            async with client.get(
+                f"{server.url}/runs/{run_id}/events", headers=h,
+            ) as resp:
+                assert (await resp.json())["count"] >= 3
+    finally:
+        await server.stop()
+
+
+async def test_sdk_auth_default_open_unchanged(tmp_path: Path) -> None:
+    """默认 auth_token=None：开放（回环兼容，既有测试即证明——冒烟一条）。"""
+    from agent_sdk.api import AgentSDKServer
+    from aiohttp import ClientSession
+
+    server = AgentSDKServer(_make_app_factory(tmp_path))
+    await server.start()
+    try:
+        async with ClientSession() as client:
+            async with client.get(f"{server.url}/runs/none") as resp:
+                assert resp.status == 404, "无鉴权时按业务语义（404）而非 401"
+    finally:
+        await server.stop()

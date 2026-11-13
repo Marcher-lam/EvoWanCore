@@ -1,93 +1,74 @@
-# EvoWanCore 交接文档（2026-11-10）
+# EvoWanCore 交接文档（V10 · 2026-11-13）
 
-> 给接手 agent：从本文档开始，按「权威文档链」顺序读完即可无缝接手。
-> 你的工作 = 续跑 V2 实现计划（31 任务，已完成 3 个，第 4 个进行中）。
+> 进化式 Agent 系统：让系统学会它没学会的东西。
+> V1 内核闭环 → V2 学习/感知/MCP → V3 真 27b 北极星 → V4 extract 1.000 →
+> V5 生态层 → V6 推迟项 → V7 清债 → V8 非目标转正 → V9 backlog 清零 →
+> V10 工程面收口。
 
-## 0. 一句话状态
+## 1. 仓库结构（uv workspace + TS SDK）
 
-V1 已完整交付（master，已推 GitHub，主实验通过：探索臂 +16.7pp、零错误经验晋级）；
-**V2（全深版）正在 `feat/v2-implementation` 分支执行，T1–T3 已完成提交，T4 处于 RED 已写、待实现状态。**
+| 包 | 职责 |
+|---|---|
+| `agent-core` | 内核：runtime（执行循环/检查点/resume）、能力目录、事件日志、状态/证据存储、记忆（含物理清除+审计）、orchestration（静态+LLM 重规划）、A2A（内部信封 + Google spec 标准）、transport、environment（CUA） |
+| `agent-sdk` | HTTP API 服务（aiohttp）：submit(QUEUED)/get/events/SSE 流/cancel/resume/explore/memory purge；可选 bearer 鉴权 |
+| `agent-adapters` | 模型/协议适配：openai_compat、lmstudio_vlm、realtime 会话、OpenAI Realtime 接入点、MCP 双向、Playwright 真 CUA（extra: browser） |
+| `agent-explore` | 探索 + B 闭环：LLM 记忆 reflector、DGM 技能演化（verify-and-revise、lineage） |
+| `agent-evolve` | 技能门禁/沙箱/注册表：最小 env、网络默认拒绝、沙箱执行 |
+| `agent-devtools` | 开发工具 |
+| `examples/docworkbench` | 北极星应用：VLM 文档工作台（27b 北极星 1.000 的载体） |
+| `agent-sdk-ts` | TypeScript 客户端 SDK（零运行时依赖，fetch + SSE + authToken） |
+| `tests_acceptance` | 验收套件（v2/v3/v5/v6/v7/v8 各一文件；v9/v10 追加在 v8 文件内；v4 无独立验收——复用 v3 门禁） |
 
-## 1. 权威文档链（按序读）
+## 2. 协议实现对照（reserved.py 四桩全落地）
 
-1. **本文件**
-2. V2 设计文档（权威需求）：`docs/superpowers/specs/2026-11-10-evowancore-v2-design.md`
-   ——含 §6 builder check 补答（北极星口径/预算计量/红线机制/评测门规则/MCP 验收方案）与 §9 M 清单，**不可跳过**
-3. V2 实现计划（任务序列）：`docs/superpowers/plans/2026-11-10-evowancore-v2.md`
-   ——31 任务 5 阶段（S1 地基 T1-9 / S2 闭环 T10-16 / S3 感知 T17-23 / S4 MCP T24-29 / S5 收尾 T30-31），每任务含 Files/Interfaces/RED 测试/提交信息
-4. 执行台账：`.superpowers/sdd/2026-11-10-evowancore-v2/progress.md`（gitignored，任务完成记录与裁决）
-5. Story 索引：`_bmad-output/stories/index.md`（gitignored，V2 Sprint 状态表）
-6. 背景可选：V1 spec `docs/superpowers/specs/2026-11-09-evowancore-v1-design.md`、实验结论 `docs/experiments/RESULTS.md`
-
-## 2. 仓库与环境事实
-
-- 本地：`/Users/marcher/Desktop/EvoWanCore`；远程：`git@github.com:Marcher-lam/EvoWanCore.git`（SSH 已通）
-- 当前分支：`feat/v2-implementation`（自 master `4e8c9f3` 分出）；master 干净
-- 测试基线：`uv run pytest` = **160 passed + 1 failed**（唯一失败 = T4 的 RED 测试 `test_wave_parallelism_enforced`，失败原因应为「并发峰值 4 超过 parallelism=2」——这是预期的进行时状态）
-- 质量门（每任务必须全过）：`uv run pytest` 全绿 + `uv run ruff check .` 无错（line-length 100，E501 不可自动修，提交前必须显式确认 ruff 干净）
-- 模型：`.env`（gitignored）配置 DeepSeek（`api.deepseek.com/v1`，`deepseek-flash`，支持 tool calling + json_object，**不支持 json_schema**——适配器已有自动降级链）
-- **key 曾在对话明文出现，用户已被告知建议轮换；不要把 key 写进任何被跟踪文件**
-- 网络：PyPI 可用（uv 正常）；npm 不可用（ECONNRESET）——所以 MCP 参考验收用 Python SDK 自建 server（计划 T25）
-- python 3.14（venv）、pytest-asyncio auto 模式、无 TodoWrite 工具（台账文件即进度）
-
-## 3. 工作方法（用户指定：matt + superpowers + bmad）
-
-- **superpowers**：按 `executing-plans` 流程逐任务执行——`task-start` 脚本取 brief → TDD 步骤 → 门禁 → `task-done` → 台账一行 → commit。中间文件：`/Users/marcher/.claude/plugins/cache/superpowers-marketplace/superpowers/7.0.1/skills/executing-plans/scripts/{task-start,task-done}`
-- **TDD 铁律**：先写失败测试、亲眼看它失败、再实现、看它过。V1 期间两次先写实现后补 RED 被记录为瑕疵——不要重蹈
-- **matt**：每任务接缝处测试先行、结束跑全量 + ruff
-- **bmad**：每任务完成在 story 索引更新对应 Sprint 状态
-- 执行模式：**native inline**（用户已确立，不派子代理实现）；最终评审（T31）才派最强模型子代理整分支评审
-- 计划是契约：偏离必须记 `Ruling:` 进台账；冲突时 spec > plan > 你的判断
-
-## 4. 精确接手点：T4（波次并发强制）进行中
-
-**已完成**：RED 测试 `test_wave_parallelism_enforced` 已写入
-`agent-explore/tests/test_exploration_controller.py`（文件末尾），**未提交**（工作树唯一未提交改动）。
-该测试用 `PeakVerifier`（verify_task 内计数+sleep）观测波内并发峰值，断言 `peak["max"] <= 2`（计划波 parallelism=2、4 任务）。已验证 RED 原因正确：「并发峰值 4 超过 parallelism=2」。
-
-**你要做的**：
-1. 跑 `uv run pytest agent-explore/tests/test_exploration_controller.py::test_wave_parallelism_enforced -x` 确认 RED（失败原因应为峰值 4 > 2）
-2. 实现：`agent-explore/src/agent_explore/controller.py` `_run_wave` 内用 `asyncio.Semaphore(plan 对应 parallelism)` 包每个任务协程——注意 `_run_wave` 目前不接收 wave 对象，parallelism 需从调用方（`_brs` 里 `plan.wave.parallelism`）传入，改签名时同步更新 `_drs`/测试调用点
-3. GREEN → `uv run pytest` 全量 + ruff → 台账 + story 索引 → Commit `fix(M9a): wave parallelism enforced`
-4. 继续 T5（预算真实计量，S1 最重要任务，是 T12/T16/T23 的前置）
-
-## 5. V2 已完成任务（分支上的提交）
-
-| 提交 | 任务 | 内容 |
+| Protocol 桩 | 实现 | 备注 |
 |---|---|---|
-| `fix(M1)` | T1 | environment_version 参数化出 Core；writer 盖戳；app 传 ENV_VERSION |
-| `fix(M2,M3)` | T2 | discover `!=` 比较；空 refs lineage 回归（M3 实测 SQLite 容忍，仅留回归测试） |
-| `fix(M7)` | T3 | verify 终态前重读 store，取消优先于过期内存态 |
+| `ProtocolAdapter` | `agent_adapters/mcp_client.py` | V2 |
+| `CompositionPolicy` | `agent_core/orchestration.py`（静态 + `LLMCompositionPolicy` 白名单防注入 + `ReplanningOrchestrator`） | V5/V6 |
+| `AgentTransport` | `agent_core/transport.py`（HTTP 信封 + registry + bearer）+ `a2a_standard.py`（Google spec：Agent Card camelCase + JSON-RPC message/send + Notification 204） | V5/V8/V9 |
+| `EnvironmentAdapter` | `environment.py`（HTTP 桩）+ `playwright_env.py`（真 chromium：iframe 穿透/open shadow/networkidle） | V5/V8/V9 |
 
-## 6. 既定裁决与陷阱（浓缩自两本台账，避免重踩）
-
-- **pydantic v2 静默忽略未知字段**：构造 ExplorationBudget(actions=4) 不会报错但字段被丢——字段名 `max_actions`（V1 实验曾因此预算无限）
-- **aiosqlite `:memory:` 不可用**（每操作新连接）：测试一律 tmp_path 文件
-- 测试假客户端必须 `async def`；monkeypatch `httpx.AsyncClient` 时先存 `orig` 防递归
-- wave/task 的 id 在测试里固定（`"id": title`），便于 verifier 定向引爆/判分
-- reflector 协议兼容同步/异步（controller 用 `inspect.isawaitable`）
-- resume 测试必须等 checkpoint 落盘再模拟崩溃（V1 竞态根因）
-- realtime 读循环用显式 `recv()`（对已关闭连接二次 `async for` 会无 await 空转冻死事件循环）
-- StrEnum（不用 `(str, Enum)`）；`_execute_action` 的因果链事件 causation=proposed.id
-- 记忆快照=波次边界语义（并行期间不写入）；诊断映射：failed 且 extract/export 前缀 → wrong_causal_model（T14 待做）
-
-## 7. V2 北极星与红线（T16/T23 的判定标准）
-
-- **北极星**：v3 感知化实验（难度 0.8、FakeVLM 读图、种子 41-43）——**explore 臂 extract 维度绝对值 ≥ 0.67**
-- **红线**：错误经验晋级率 = 0（两轮 V1 实验均为 0，不得回退）
-- 预算口径：真实模型调用计数（T5 实装），保留集任务**绝对禁止**进入评测门（T12 守卫）
-- v3 前先跑 B 检查点实验（T16，文本语料，~10 分钟）
-
-## 8. 收尾路径（T31 之后）
-
-最终评审（Opus 子代理，携 Review Focus + Ruling 台账）→ Critical/Important 各自 RED→GREEN 修复一轮 → minors 记台账 → 合并 master → push。V1 已有完整先例（master 历史上 `fix: final-review fixes` 提交）。
-
-## 9. 快速命令
+## 3. 如何跑
 
 ```bash
-uv run pytest                          # 全量测试
-uv run ruff check . --fix              # lint（E501 手动拆行）
-set -a; source .env; set +a            # 载入供应商配置
-uv run python -m agent_devtools run-experiment --config <json> --out <json>   # 实验
-git log --oneline master..HEAD         # V2 分支提交
+uv sync                                # Python 全依赖（root 已带 agent-adapters[browser]）
+uv run playwright install chromium    # 真浏览器测试需要（无则 skip）
+uv run ruff check .                    # lint
+uv run pytest -q                       # 全量 349+（零网络依赖；LM Studio 仅实验脚本用）
+cd agent-sdk-ts && npm install && npx tsc -p tsconfig.json && node smoke/run.mjs
+                                       # TS SDK 编译 + 对真 Python server 冒烟
 ```
+
+CI：`.github/workflows/ci.yml`（python: ruff+pytest+chromium；ts: tsc+smoke）。
+发布：`.github/workflows/release.yml`（手动触发，构建+校验；publish 需凭据）。
+
+## 4. 北极星与红线
+
+- **北极星**（V4 达成）：真 27b VLM `explore 1.000 / extract 1.000`，红线 0，
+  comparable（双臂同预算）。关键机制：terminal-yield、vision-update（convert 后
+  切 2x 图）、祈使式记忆渲染、pre-gate audit veto、doc_id 过滤。
+- **安全红线**（不可破）：
+  1. 任何 key 不写入被跟踪文件（验收扫描 `sk-` 形态；曾泄漏的 key 已建议轮换）
+  2. 能力副作用如实声明（write 不得伪装 read；CUA click/type=`write`+`auth_scope=["cua:act"]`）
+  3. Skill 沙箱：最小 env、网络默认拒绝、路径穿越防护
+  4. LLM 编排输出过白名单（幻觉 agent id 丢弃、非法终止词 fail-safe terminate）
+  5. token 比较恒时（hmac.compare_digest）
+
+## 5. 设计取舍索引（Ruling，按版本）
+
+- [V5 计划](superpowers/plans/2026-11-12-evowancore-v5.md)：SSE/resume/LLM 调度推迟 V6（已清偿）
+- [V6 计划](superpowers/plans/2026-11-12-evowancore-v6.md)：终评审修复记录
+- [V7 计划](superpowers/plans/2026-11-12-evowancore-v7.md)：清债轮 Ruling
+- [V8 计划](superpowers/plans/2026-11-12-evowancore-v8.md)：A2A streaming/push/tasks 不做；Playwright 嵌套 shadow 递归/可见性过滤遗留
+- [V9 计划](superpowers/plans/2026-11-13-evowancore-v9.md)：backlog 清零；task-mode 待生态
+- [V10 计划](superpowers/plans/2026-11-13-evowancore-v10.md)：发布为"就绪"不"发布"
+
+## 6. 交接须知
+
+- 分支：`master` 为唯一长期分支；每版 `feat/vN-*` 合并后保留
+- 测试即验收：每版验收套件在 `tests_acceptance/test_vN_acceptance.py`
+- 方法论：superpowers（外层循环+终评审 subagent）/ matt（TDD+ruff+全量门禁）/
+  bmad（story 纪律）——终评审 MUST 模式已连续抓回真雷（V6 SSE 尾丢事件、
+  V8 A2A snake_case、V9 划线未命中），**不要跳过**
+- LLM 供应商：LM Studio 本地（OpenAI 兼容，`reasoning_effort=low` 提速 4-10x）；
+  实验脚本在 examples/ 与 docs/experiments/，不在 pytest 内
