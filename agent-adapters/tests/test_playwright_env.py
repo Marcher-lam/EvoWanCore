@@ -91,3 +91,127 @@ async def test_act_unknown_action_reports_error() -> None:
         assert r["ok"] is False and "teleport" in r["error"]
     finally:
         await adapter.aclose()
+
+
+# ---------- V9-T3: 真站点适配（iframe / shadow DOM / networkidle） ----------
+
+from aiohttp import web  # noqa: E402
+
+_HOST_PAGE = """<html><body>
+<h1>Host Page</h1>
+<div id="shadow-host"></div>
+<iframe id="fra" src="/frame"></iframe>
+<script>
+  const root = document.getElementById('shadow-host').attachShadow({mode:'open'});
+  const b = document.createElement('button');
+  b.id = 'sbtn'; b.textContent = 'ShadowBtn';
+  b.onclick = () => { b.textContent = 'shadow-done'; };
+  root.appendChild(b);
+</script>
+</body></html>"""
+
+_FRAME_PAGE = """<html><body>
+<button id="fbtn">FrameBtn</button>
+<script>
+  document.getElementById('fbtn').onclick = () => {
+    document.getElementById('fout').textContent = 'frame-clicked';
+  };
+</script>
+<div id="fout">frame-idle</div>
+</body></html>"""
+
+# 懒加载页：300ms 后 fetch 才把文本放进来（networkidle 等待的靶子）
+_SLOW_PAGE = """<html><body><div id="late">loading</div>
+<script>
+setTimeout(() => fetch('/late-data').then(r => r.text()).then(t => {
+  document.getElementById('late').textContent = t;
+}), 300);
+</script></body></html>"""
+
+
+async def _site(tmp=None):  # noqa: ARG001
+    """起真 HTTP 站点（host + frame + slow 三页）。返回 (runner, url)。"""
+    async def _host(_r):
+        return web.Response(text=_HOST_PAGE, content_type="text/html")
+
+    async def _frame(_r):
+        return web.Response(text=_FRAME_PAGE, content_type="text/html")
+
+    async def _slow(_r):
+        return web.Response(text=_SLOW_PAGE, content_type="text/html")
+
+    async def _late(_r):
+        return web.Response(text="late-content-arrived")
+
+    app = web.Application()
+    app.router.add_get("/host", _host)
+    app.router.add_get("/frame", _frame)
+    app.router.add_get("/slow", _slow)
+    app.router.add_get("/late-data", _late)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    return runner, f"http://127.0.0.1:{port}"
+
+
+async def test_iframe_click_and_observe() -> None:
+    """iframe 内按钮：target 未命中主 frame → 遍历子 frame 命中并真点击。"""
+    runner, url = await _site()
+    adapter = PlaywrightEnvironmentAdapter()
+    try:
+        await adapter.goto(f"{url}/host")
+        # 主 frame DOM（含 shadow 内文本由 inner_text 不可见——见 shadow 测试）
+        obs = await adapter.observe()
+        assert "Host Page" in obs["dom"]
+        assert "frame-idle" in obs["dom"], "observe 必须并入 iframe 文本"
+        r = await adapter.act({"action": "click", "target": "#fbtn"})
+        assert r["ok"] is True, f"iframe 内点击失败: {r}"
+        obs2 = await adapter.observe()
+        assert "frame-clicked" in obs2["dom"], "iframe 点击效果必须可见"
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()
+
+
+async def test_open_shadow_dom_click() -> None:
+    """open shadow root 内按钮：Playwright CSS 原生穿透可点击。"""
+    runner, url = await _site()
+    adapter = PlaywrightEnvironmentAdapter()
+    try:
+        await adapter.goto(f"{url}/host")
+        r = await adapter.act({"action": "click", "target": "#sbtn"})
+        assert r["ok"] is True, f"shadow 点击失败: {r}"
+        obs = await adapter.observe()
+        assert "shadow-done" in obs["dom"], "shadow 内状态变化必须可见"
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()
+
+
+async def test_observe_networkidle_waits_for_lazy_content() -> None:
+    """observe(settle='networkidle')：等到懒加载请求落定后的文本。"""
+    runner, url = await _site()
+    adapter = PlaywrightEnvironmentAdapter()
+    try:
+        await adapter.goto(f"{url}/slow")
+        obs = await adapter.observe(settle="networkidle")
+        assert "late-content-arrived" in obs["dom"], \
+            "networkidle 必须等到懒加载完成"
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()
+
+
+async def test_target_not_found_reports_error() -> None:
+    """目标在所有 frame 均未命中 → 如实报错（ok=False）。"""
+    runner, url = await _site()
+    adapter = PlaywrightEnvironmentAdapter()
+    try:
+        await adapter.goto(f"{url}/host")
+        r = await adapter.act({"action": "click", "target": "#nope-anywhere"})
+        assert r["ok"] is False and "nope-anywhere" in r["error"]
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()

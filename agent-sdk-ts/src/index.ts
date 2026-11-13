@@ -11,11 +11,25 @@ import {
   TERMINAL_STATES,
 } from "./types.js";
 
+export interface ClientOptions {
+  /**
+   * fetch 实现（默认全局 fetch）。连接复用说明：
+   * - Node >= 18：全局 fetch 基于 undici，默认走连接池（keep-alive），
+   *   无需额外配置；需要调优（keepAliveTimeout/pipelining/自定义 Agent）
+   *   时，可注入绑定 dispatcher 的 fetch（如 `undici.fetch` + `setGlobalDispatcher`，
+   *   或 `(url, init) => undici.fetch(url, { ...init, dispatcher })`）。
+   * - 浏览器：同源连接由浏览器池化，注入 fetch 亦可接 mock。
+   */
+  fetch?: typeof fetch;
+}
+
 export class AgentSDKClient {
   private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, opts: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.fetchImpl = opts.fetch ?? fetch;
   }
 
   /** 提交任务 → 立即返回 QUEUED（提交-轮询模型）。 */
@@ -98,7 +112,7 @@ export class AgentSDKClient {
     if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
     // 连接建立 30s 超时（流本身长期打开，不受此限）；可被 signal 中止
     const connectSignal = opts.signal ?? undefined;
-    const resp = await fetch(
+    const resp = await this.fetchImpl(
       `${this.baseUrl}/runs/${encodeURIComponent(runId)}/events/stream`,
       {
         headers,
@@ -148,7 +162,7 @@ export class AgentSDKClient {
     body?: unknown,
     expect = 200,
   ): Promise<T> {
-    const resp = await fetch(`${this.baseUrl}${path}`, {
+    const resp = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: body !== undefined ? { "Content-Type": "application/json" } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,

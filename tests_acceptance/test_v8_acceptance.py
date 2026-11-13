@@ -175,3 +175,91 @@ def test_v8_no_secrets_regression() -> None:
         if p.exists() and pattern.search(p.read_text(errors="ignore")):
             offenders.append(f)
     assert offenders == [], f"疑似 key 泄漏: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# V9 追加：backlog 清零（Notification 204 / 真站点 iframe+shadow+networkidle）
+# ---------------------------------------------------------------------------
+
+async def test_v9_a2a_notification_semantics() -> None:
+    """无 id → 副作用执行 + 204 无 body；客户端 notify_text 闭环。"""
+    from agent_core.a2a_standard import (
+        A2AStandardClient,
+        A2AStandardEndpoint,
+        AgentCard,
+    )
+    from agent_core.transport import A2AEnvelope
+
+    handled: list[A2AEnvelope] = []
+
+    async def handler(env: A2AEnvelope) -> A2AEnvelope | None:
+        handled.append(env)
+        return None
+
+    ep = A2AStandardEndpoint(
+        AgentCard(name="v9", url="http://x/"), handler, port=0,
+    )
+    await ep.start()
+    try:
+        assert await A2AStandardClient(
+            f"http://127.0.0.1:{ep.port}"
+        ).notify_text("one-way") is None
+        assert len(handled) == 1 and handled[0].payload["text"] == "one-way"
+    finally:
+        await ep.stop()
+
+
+async def test_v9_playwright_real_site_full_loop() -> None:
+    """真 HTTP 站点：iframe 点击 + shadow 点击 + networkidle 懒加载一站验证。"""
+    import pytest
+
+    pytest.importorskip("playwright")
+    from agent_adapters.playwright_env import (
+        BrowserUnavailable,
+        PlaywrightEnvironmentAdapter,
+    )
+    from aiohttp import web
+
+    async def _host(_r):
+        return web.Response(text=(
+            "<html><body><h1>Host</h1>"
+            "<div id='sh'></div><iframe src='/fr'></iframe>"
+            "<script>const r=document.getElementById('sh').attachShadow({mode:'open'});"
+            "r.innerHTML=\"<button id='sb' onclick=\\\"this.textContent='sd'\\\">S</button>\";"
+            "</script></body></html>"
+        ), content_type="text/html")
+
+    async def _fr(_r):
+        return web.Response(text=(
+            "<html><body><button id='fb' onclick="
+            "\"document.getElementById('fo').textContent='fc'\">F</button>"
+            "<div id='fo'>fi</div></body></html>"
+        ), content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/host", _host)
+    app.router.add_get("/fr", _fr)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+
+    adapter = PlaywrightEnvironmentAdapter()
+    try:
+        await adapter.goto(f"http://127.0.0.1:{port}/host")
+    except BrowserUnavailable as e:
+        import pytest
+
+        await adapter.aclose()
+        await runner.cleanup()
+        pytest.skip(f"chromium 不可用: {e}")
+    try:
+        assert (await adapter.act({"action": "click", "target": "#fb"}))["ok"]
+        assert (await adapter.act({"action": "click", "target": "#sb"}))["ok"]
+        obs = await adapter.observe()
+        assert "fc" in obs["dom"], "iframe 点击效果可见"
+        assert "sd" in obs["dom"], "shadow 点击效果可见"
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()

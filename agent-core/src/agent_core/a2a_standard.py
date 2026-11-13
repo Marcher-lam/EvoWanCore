@@ -138,9 +138,12 @@ class A2AStandardEndpoint:
             if not isinstance(rpc, dict) or rpc.get("jsonrpc") != "2.0":
                 return _jsonrpc_error(None, -32600, "Invalid Request")
             req_id = rpc.get("id")
+            is_notification = "id" not in rpc  # JSON-RPC 2.0：无 id = Notification
             if "method" not in rpc:
                 return _jsonrpc_error(req_id, -32600, "Invalid Request")
             if rpc["method"] != "message/send":
+                if is_notification:
+                    return web.Response(status=204)  # Notification 错误也不回包
                 return _jsonrpc_error(
                     req_id, -32601, f"Method not found: {rpc['method']}"
                 )
@@ -148,6 +151,8 @@ class A2AStandardEndpoint:
             params = rpc.get("params") or {}
             message = params.get("message")
             if not isinstance(message, dict) or not message.get("parts"):
+                if is_notification:
+                    return web.Response(status=204)
                 return _jsonrpc_error(
                     req_id, -32602, "Invalid params: message.parts 必填"
                 )
@@ -163,6 +168,9 @@ class A2AStandardEndpoint:
             reply = self._handler(envelope)
             if hasattr(reply, "__await__"):
                 reply = await reply
+            if is_notification:
+                # 副作用已执行，但不回包（HTTP 204 无 body）
+                return web.Response(status=204)
             reply_text = (
                 reply.payload.get("text", "") if reply is not None else ""
             )
@@ -242,3 +250,32 @@ class A2AStandardClient:
         return "\n".join(
             p.get("text", "") for p in parts if p.get("kind") == "text"
         )
+
+    async def notify_text(self, text: str) -> None:
+        """单向通知（JSON-RPC Notification：无 id）——服务端执行但不回包。"""
+        headers = (
+            {"Authorization": f"Bearer {self._auth_token}"}
+            if self._auth_token else {}
+        )
+        payload = {
+            "jsonrpc": "2.0",  # 无 id = Notification
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "kind": "message",
+                    "messageId": f"msg_{uuid.uuid4().hex[:12]}",
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": text}],
+                }
+            },
+        }
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{self._base_url}/", json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                if resp.status != 204:
+                    raise A2ARpcError(
+                        -32603, f"Notification 应答 204，实际 {resp.status}", None
+                    )
