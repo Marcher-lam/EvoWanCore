@@ -76,8 +76,17 @@ class AgentSDKServer:
         self._port = port
         self._sse_poll_s = sse_poll_s
         self._sse_heartbeat_s = sse_heartbeat_s
-        if auth_token is not None and not auth_token:
-            raise ValueError("auth_token 不能为空串（会全站恒 401）")
+        if auth_token is not None:
+            if not auth_token:
+                raise ValueError("auth_token 不能为空串（会全站恒 401）")
+            try:
+                auth_token.encode("latin-1")
+            except UnicodeEncodeError as e:
+                # 非 latin-1 token（如 CJK）会让 _auth_guard 每请求恒抛
+                # → 全站静默 401——与空串同类误配，构造期 fail-fast
+                raise ValueError(
+                    "auth_token 必须可 latin-1 编码（否则全站恒 401）"
+                ) from e
         self._auth_token = auth_token
         self._components: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None

@@ -95,6 +95,51 @@ async function main() {
     assert(threw, "getRun(不存在) 应抛 404 SdkHttpError");
     console.log("404 error surface: ok");
 
+    // ---- 鉴权段（V10 OCR）：无 token 401；带 token 全链路 ----
+    const authServer = spawn(
+      "uv", ["run", "python", serverPy],
+      {
+        cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, SMOKE_AUTH_TOKEN: "smoke-token-1" },
+      },
+    );
+    const authUrl = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("auth server 未就绪")), 60_000,
+      );
+      authServer.stdout.on("data", (d) => {
+        const m = String(d).match(/READY (http:\/\/\S+)/);
+        if (m) { clearTimeout(timer); resolve(m[1]); }
+      });
+      authServer.on("exit", (c) => reject(new Error(`auth server 退出 ${c}`)));
+    });
+    try {
+      let unauthorized = false;
+      try {
+        await new AgentSDKClient(authUrl).getRun("anything");
+      } catch (e) {
+        unauthorized = e instanceof SdkHttpError && e.status === 401;
+      }
+      assert(unauthorized, "无 token 必须 401");
+      const authClient = new AgentSDKClient(authUrl, { authToken: "smoke-token-1" });
+      const aSubmitted = await authClient.submitRun({
+        task_id: "ts-smoke-auth", kind: "test", goal: {},
+        acceptance_criteria: [{ check: "done" }],
+      });
+      const aFinal = await authClient.waitForTerminal(aSubmitted.run_id, { timeoutMs: 15_000 });
+      assert(aFinal.state === "succeeded", `鉴权链路状态 ${aFinal.state}`);
+      const aEvents = [];
+      await authClient.streamEvents(aSubmitted.run_id, (e) => aEvents.push(e));
+      assert(aEvents.length >= 3, "鉴权 SSE 事件不足");
+      console.log("auth roundtrip: 401 + token submit/SSE ok");
+    } finally {
+      authServer.kill("SIGTERM");
+      const aExited = new Promise((r) => authServer.on("exit", r));
+      if (!(await Promise.race([aExited.then(() => true), sleep(3000).then(() => false)]))) {
+        authServer.kill("SIGKILL");
+      }
+    }
+
     console.log("SMOKE PASS ✅");
   } catch (e) {
     fail(e.message);

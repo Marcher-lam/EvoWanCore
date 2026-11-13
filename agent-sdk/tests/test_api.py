@@ -305,3 +305,15 @@ async def test_sdk_auth_default_open_unchanged(tmp_path: Path) -> None:
                 assert resp.status == 404, "无鉴权时按业务语义（404）而非 401"
     finally:
         await server.stop()
+
+
+async def test_sdk_auth_token_misconfig_fail_fast() -> None:
+    """构造期 fail-fast：空串与非 latin-1 token（否则全站静默恒 401）。"""
+    import pytest
+    from agent_sdk.api import AgentSDKServer
+
+    factory = _make_app_factory(Path("/tmp/never-used"))
+    with pytest.raises(ValueError, match="空串"):
+        AgentSDKServer(factory, auth_token="")
+    with pytest.raises(ValueError, match="latin-1"):
+        AgentSDKServer(factory, auth_token="密钥不能是中文")
