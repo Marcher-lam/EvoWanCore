@@ -247,14 +247,10 @@ async def test_v9_playwright_real_site_full_loop() -> None:
 
     adapter = PlaywrightEnvironmentAdapter()
     try:
-        await adapter.goto(f"http://127.0.0.1:{port}/host")
-    except BrowserUnavailable as e:
-        import pytest
-
-        await adapter.aclose()
-        await runner.cleanup()
-        pytest.skip(f"chromium 不可用: {e}")
-    try:
+        try:
+            await adapter.goto(f"http://127.0.0.1:{port}/host")
+        except BrowserUnavailable as e:
+            pytest.skip(f"chromium 不可用: {e}")
         assert (await adapter.act({"action": "click", "target": "#fb"}))["ok"]
         assert (await adapter.act({"action": "click", "target": "#sb"}))["ok"]
         obs = await adapter.observe()

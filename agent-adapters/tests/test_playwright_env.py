@@ -3,6 +3,7 @@
 import base64
 
 import pytest
+from aiohttp import web
 
 pytest.importorskip("playwright", reason="playwright 未安装（extra: browser）")
 
@@ -92,10 +93,7 @@ async def test_act_unknown_action_reports_error() -> None:
     finally:
         await adapter.aclose()
 
-
 # ---------- V9-T3: 真站点适配（iframe / shadow DOM / networkidle） ----------
-
-from aiohttp import web  # noqa: E402
 
 _HOST_PAGE = """<html><body>
 <h1>Host Page</h1>
@@ -129,7 +127,7 @@ setTimeout(() => fetch('/late-data').then(r => r.text()).then(t => {
 </script></body></html>"""
 
 
-async def _site(tmp=None):  # noqa: ARG001
+async def _site():
     """起真 HTTP 站点（host + frame + slow 三页）。返回 (runner, url)。"""
     async def _host(_r):
         return web.Response(text=_HOST_PAGE, content_type="text/html")

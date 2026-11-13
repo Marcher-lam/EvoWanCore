@@ -62,7 +62,7 @@ policy.decide_termination → continue 则重规划下一轮（已成功者不�
 选人去重；planner 异常 fail-safe；json 围栏宽容解析；
 image_urls scheme 白名单 + 2MB 上限；crash-sim 检查点 flake。
 
-有意遗留（backlog，非阻塞）：
-- SSE 心跳帧（: ping）与 seq 游标增量读（当前全量读 O(n^2) 可接受）
-- 测试端口 port=0 化（CI 并行碰撞风险）
-- runtime cancel 路径孤儿 cancel_wait 任务（预存在，仅测试 crash-sim 触发）
+有意遗留（backlog，非阻塞）——已于 V7 全部清偿（见 v7 计划终评审 Ruling）：
+- ~~SSE 心跳帧（: ping）与 seq 游标增量读~~（V7-T2 交付）
+- ~~测试端口 port=0 化~~（V7-T3 交付）
+- ~~runtime cancel 路径孤儿 cancel_wait 任务~~（V7-T1 交付）

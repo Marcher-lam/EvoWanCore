@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from typing import Any
+from typing import Any, Literal
 
 
 class BrowserUnavailable(RuntimeError):
@@ -106,22 +106,36 @@ class PlaywrightEnvironmentAdapter:
                 return loc
         return None
 
-    async def observe(self, settle: str | None = None) -> dict:
-        """DOM 快照（主+子 frame 可读性文本）+ PNG 截图 data URL。
+    async def observe(
+        self, settle: Literal["networkidle"] | None = None
+    ) -> dict:
+        """DOM 快照（主+子 frame + open shadow 树文本）+ PNG 截图 data URL。
 
         settle：可选等待——"networkidle" 等网络静默（懒加载站点），
-        None（默认）不额外等待。
+        None（默认）不额外等待；其他值 raise（typo 不静默失效）。
+        返回 dict 附 settled 标志（settle 请求是否真正静默完成）。
         """
         await self._ensure()
+        settled = settle is None  # 不等待 → 视为已定
         if settle == "networkidle":
             try:
-                await self._page.wait_for_load_state("networkidle", timeout=10_000)
-            except Exception:  # noqa: BLE001 — 超时降级：拿当前状态
-                pass
+                await self._page.wait_for_load_state(
+                    "networkidle", timeout=10_000
+                )
+                settled = True
+            except TimeoutError as e:  # 收窄：只吞超时（页面永不静默→降级）
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "networkidle 10s 未静默，降级取当前状态: %s", e
+                )
+        elif settle is not None:
+            raise ValueError(f"未知 settle 模式: {settle!r}（仅支持 networkidle）")
         dom = await self._dom_text()
         png: bytes = await self._page.screenshot()
         return {
             "dom": dom,
+            "settled": settled,
             "screenshot_url": (
                 "data:image/png;base64," + base64.b64encode(png).decode()
             ),
