@@ -2,7 +2,6 @@
 
 import {
   CancelRunResponse,
-  MragQueryResponse,
   PurgeResponse,
   RunStatus,
   SdkEvent,
@@ -171,14 +170,17 @@ export class AgentSDKClient {
     }
   }
 
-  /** MRAG 问答/检索（服务端需配置 mrag 组件，否则 503）。 */
-  async mragQuery(
-    query: string,
-    opts: { k?: number; mode?: "answer" | "retrieve" } = {},
-  ): Promise<MragQueryResponse> {
-    return this.json("POST", "/mrag/query", {
-      query, k: opts.k ?? 4, mode: opts.mode ?? "answer",
-    });
+  /**
+   * 通用请求（二次开发消费）：调用服务端 extra_routes 挂载的任意端点。
+   * 鉴权头自动附带；非 2xx 抛 SdkHttpError。
+   */
+  async request<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    // expect 省略 → 任意 2xx（类型 T 由调用方自负）；2xx 空体会抛解析错
+    return this.json<T>(method, path, body, undefined);
   }
 
   // ---------- 内部 ----------
@@ -187,7 +189,7 @@ export class AgentSDKClient {
     method: string,
     path: string,
     body?: unknown,
-    expect = 200,
+    expect?: number,  // undefined = 任意 2xx
   ): Promise<T> {
     const resp = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
@@ -198,7 +200,10 @@ export class AgentSDKClient {
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),  // 单请求上限（防挂死轮询）
     });
-    if (resp.status !== expect) {
+    if (expect !== undefined && resp.status !== expect) {
+      throw new SdkHttpError(resp.status, path, await resp.text());
+    }
+    if (expect === undefined && !resp.ok) {
       throw new SdkHttpError(resp.status, path, await resp.text());
     }
     return (await resp.json()) as T;

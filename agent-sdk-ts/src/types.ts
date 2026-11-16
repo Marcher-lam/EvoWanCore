@@ -72,24 +72,3 @@ export class SdkHttpError extends Error {
   }
 }
 
-/** MRAG 查询模式：answer=VLM 带引用生成；retrieve=仅检索。 */
-export type MragMode = "answer" | "retrieve";
-
-export interface MragHit {
-  content: string;
-  doc: string;
-  page: number;
-  score: number;
-  page_image: string;
-}
-
-export interface MragCitation {
-  doc: string;
-  page: number;
-}
-
-export interface MragQueryResponse {
-  answer: string;
-  citations: MragCitation[];
-  hits: MragHit[];
-}

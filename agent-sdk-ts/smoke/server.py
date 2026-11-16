@@ -78,50 +78,24 @@ async def main() -> None:
         components = {
             "runtime": runtime, "agents": {"default": agent}, "app": None,
         }
-        # MRAG 组件（V12 冒烟）：Fake VLM + Hash 向量——零网络
-        from examples.mrag.app import MRAGApp
-        from examples.mrag.embed import HashEmbedding
-
-        class _SmokeVLM:
-            def capabilities(self):
-                from agent_core.models import (
-                    Modality,
-                    ModelCapabilities,
-                )
-
-                return ModelCapabilities(
-                    model_id="m-smoke-vlm",
-                    inputs={Modality.TEXT, Modality.IMAGE},
-                )
-
-            async def infer(self, request):
-                from agent_core.models import InferResponse
-
-                return InferResponse(text="金额 42 元 [smoke.pdf p.1]。")
-
-        mrag = MRAGApp(
-            db_path=tmp / "mrag.db", blobs_dir=tmp / "mrag_blobs",
-            embedder=HashEmbedding(), vlm=_SmokeVLM(),
-        )
-        components["mrag"] = mrag
         return components
 
+
     # 冒烟默认启用鉴权——顺带覆盖 TS authToken 全路径（OCR test 项）
+    # 扩展点冒烟：平台通用 extra_routes（demo 路由，非任何应用概念）
+    from aiohttp import web as _web
+
+    demo_routes = _web.RouteTableDef()
+
+    @demo_routes.get("/demo/ping")
+    async def _ping(_request):
+        return _web.json_response({"pong": True})
+
     server = AgentSDKServer(
         factory, port=0, auth_token=os.environ.get("SMOKE_AUTH_TOKEN"),
+        extra_routes=demo_routes,
     )
     await server.start()
-    # MRAG 预热（async 上下文内；READY 前完成——客户端打来时索引就绪）
-    mrag = server._components.get("mrag")  # noqa: SLF001 — smoke server 内部
-    if mrag is not None and not (tmp / "mrag_seeded").exists():
-        (tmp / "mrag_seeded").write_text("1")
-        from examples.mrag.store import SourceDoc as _SD
-
-        await mrag.ingest(_SD(
-            name="smoke.pdf",
-            pages=[(1, b"\x89PNG\r\n\x1anp1")],
-            text="第1页：冒烟语料 金额 42 元。",
-        ))
     print(f"READY {server.url}", flush=True)
     try:
         while True:
