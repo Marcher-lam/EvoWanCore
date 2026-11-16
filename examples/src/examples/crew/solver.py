@@ -88,17 +88,27 @@ def make_solver_env(
     registry = InMemoryCapabilityRegistry()
     env_holder: dict[str, CrewEnv] = {}
 
+    def _as_dict(args):
+        """27b 怪癖（V3/V4 同款）：tool arguments 可能是 JSON 字符串。"""
+        import json as _json
+
+        value = args
+        for _ in range(2):  # 双层（整体 str + 字段 str）
+            if isinstance(value, str):
+                try:
+                    value = _json.loads(value)
+                except ValueError:
+                    env = env_holder["env"]
+                    if env is not None:
+                        env.last_errors = ["malformed_json"]
+                    return {"__malformed__": True}
+        return value
+
     async def _submit(args: dict) -> dict:
         env = env_holder["env"]
         assert env and env.current_truth is not None
-        # 27b 怪癖（V3/V4 同款）：tool arguments 可能整体是 JSON 字符串
-        if isinstance(args, str):
-            import json as _json
-            args = _json.loads(args)
+        args = _as_dict(args)
         fields = args.get("fields", args)
-        if isinstance(fields, str):
-            import json as _json
-            fields = _json.loads(fields)
         ok, errors = grader(fields, env.current_truth)
         if not ok:
             env.last_errors = list(errors)  # 反射器据此产技能候选
@@ -117,6 +127,7 @@ def make_solver_env(
 
     async def _classify(args: dict) -> dict:
         env = env_holder["env"]
+        args = _as_dict(args)
         env.last_classification = dict(args.get("result", args))
         env.stage_pass = True
         return {"ok": True}
@@ -130,6 +141,7 @@ def make_solver_env(
 
     async def _audit(args: dict) -> dict:
         env = env_holder["env"]
+        args = _as_dict(args)
         env.last_audit = dict(args.get("result", args))
         env.stage_pass = True
         return {"ok": True}

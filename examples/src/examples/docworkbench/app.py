@@ -248,6 +248,10 @@ class DocumentAgentApp:
             return {t["id"] for t in self._corpus.tasks}
         return {t["id"] for t in self._practice_part.tasks}
 
+    def events(self, run_id: str):
+        """公有事件流（M8 模式——编排层 auditor 等外部消费免触私有）。"""
+        return self._runtime.events(run_id)
+
     async def solve(self, corpus_task: dict) -> RunHandle:
         # T23：每次 solve 从原始文档开始——评测门父子臂/重试臂不得共享上一轮 convert
         # 的派生产物（否则 parent 臂经 with 臂的 derived 白读真值，对照失效）

@@ -41,8 +41,11 @@ def test_role_selection_by_dimension() -> None:
     agents = wb_agents()
     assert policy.select_participants(_T("wb:extract"), agents) == \
         ["solver-extract"]
-    assert policy.select_participants(_T("wb:explore"), agents) == \
-        ["solver-explore"]
+    assert policy.select_participants(_T("wb:export"), agents) == \
+        ["solver-export"]
+    assert policy.select_participants(_T("wb:convert"), agents) == \
+        ["solver-convert"]
+    assert policy.select_participants(_T("wb:unknown"), agents) == []
 
 
 async def test_solve_batch_parallel_faster_than_serial(tmp_path: Path) -> None:
@@ -172,3 +175,20 @@ async def test_orchestration_does_not_touch_northstar_path(
     await orch.solve_one(task)
     r2 = await app.solve(task)
     assert r1.state.value == r2.state.value, "编排层不得改变 solve 行为"
+
+
+async def test_dual_app_four_capabilities_matrix(tmp_path: Path) -> None:
+    """V16 验收：按 dimension 断言具体 solver（可失败——非前缀永真）。"""
+    from examples.docworkbench.orchestrated import OrchestratedWorkbench
+
+    app, practice = _fixture(tmp_path)
+    orch = OrchestratedWorkbench(app)
+    tasks = practice.tasks[:3]
+    report = await orch.solve_batch(tasks)
+    assert len(report) == 3
+    for task, r in zip(tasks, report, strict=True):
+        expected = f"solver-{task['dimension']}"
+        assert r["solver"] == expected, \
+            f"{task['dimension']} 应选 {expected}，实际 {r['solver']}"
+    # 矩阵固化：docworkbench 探索/学习/进化=既有(V1-V4), 编排=本版；
+    # crew 四能力=V14/V15, 真模型=V16 入口+2 缺陷修复

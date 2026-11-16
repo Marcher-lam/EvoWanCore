@@ -12,7 +12,8 @@ CapabilityCompositionPolicy、执行走 app.solve——编排语义在分派层�
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from agent_core.orchestration import CapabilityCompositionPolicy
@@ -20,9 +21,13 @@ from agent_core.orchestration import CapabilityCompositionPolicy
 
 @dataclass
 class FailedRun:
-    """编排层失败占位（重派语义的可测载体）。"""
+    """编排层失败占位（RunHandle 契约对齐：id + state.value）。"""
 
     task_id: str
+
+    @property
+    def id(self) -> str:
+        return self.task_id
 
     @property
     def state(self):
@@ -33,25 +38,26 @@ class FailedRun:
 
 
 def wb_agents() -> list:
-    """docworkbench 三角色：extract/explore 求解 + audit 审计。"""
+    """四维度 solver + audit（generator DIMS 全覆盖——无静默兜底）。"""
     from agent_core.runtime.driver import AgentSpec
 
-    return [
-        AgentSpec(id="solver-extract", role="extractor",
-                  capabilities=["wb:extract"], model_id="wb"),
-        AgentSpec(id="solver-explore", role="explorer",
-                  capabilities=["wb:explore"], model_id="wb"),
-        AgentSpec(id="auditor", role="auditor",
-                  capabilities=["wb:audit"], model_id="wb"),
+    dims = ["wb:extract", "wb:export", "wb:convert", "wb:validate"]
+    agents = [
+        AgentSpec(id=f"solver-{d.split(':')[1]}", role=d.split(":")[1],
+                  capabilities=[d], model_id="wb")
+        for d in dims
     ]
+    agents.append(AgentSpec(id="auditor", role="auditor",
+                            capabilities=["wb:audit"], model_id="wb"))
+    return agents
 
 
-@dataclass
-class BatchReport:
-    total: int
-    succeeded: int
-    redispatched: int = 0
-    results: list = field(default_factory=list)
+_SOLVER_FALLBACK = {
+    "solver-extract": "solver-validate",  # 重派换视角：验证型 solver 复核
+    "solver-export": "solver-convert",
+    "solver-convert": "solver-export",
+    "solver-validate": "solver-extract",
+}
 
 
 class OrchestratedWorkbench:
@@ -64,16 +70,16 @@ class OrchestratedWorkbench:
         self._agents = wb_agents()
 
     def _select_solver(self, task: dict) -> str:
-        """平台真选人：task dimension → wb:{dim} → 对应 solver。"""
-        kind = f"wb:{task.get('dimension', 'extract')}"
+        """平台真选人：dimension → wb:{dim} → 对应 solver（无命中 raise）。
 
-        class _T:
-            pass
-
-        t = _T()
-        t.kind = kind
-        selected = self._policy.select_participants(t, self._agents)
-        return selected[0] if selected else "solver-extract"
+        probe 用 SimpleNamespace（policy 只读 .kind；TaskSpec(id="") 会
+        过 pydantic 校验——实测并行批全炸 ValidationError）。
+        """
+        probe = SimpleNamespace(kind=f"wb:{task.get('dimension', '')}")
+        selected = self._policy.select_participants(probe, self._agents)
+        if not selected:
+            raise ValueError(f"无 solver 覆盖维度: {task.get('dimension')}")
+        return selected[0]
 
     async def solve_one(self, task: dict) -> dict:
         """单任务：选人 → solve → 失败重派（≤max_retries）→ 审计诊断。"""
@@ -95,10 +101,31 @@ class OrchestratedWorkbench:
         return result
 
     async def solve_batch(self, tasks: list[dict]) -> list[dict]:
-        """并行分派（asyncio.gather——真并行，批耗时≈最慢单任务）。"""
-        return list(await asyncio.gather(
-            *[self.solve_one(t) for t in tasks]
-        ))
+        """并行分派 + 异常隔离（对齐平台 Orchestrator：单任务炸不弃兄弟）。
+
+        批内 doc_id 必须唯一（app.derived 共享 dict——串行重试安全，
+        并行共享 doc 会串味，入口断言显式拒绝）。
+        """
+        doc_ids = [t.get("doc_id") for t in tasks if t.get("doc_id")]
+        if len(doc_ids) != len(set(doc_ids)):
+            raise ValueError("批内 doc_id 重复（derived 并发串味风险）")
+        outcomes = await asyncio.gather(
+            *[self.solve_one(t) for t in tasks], return_exceptions=True,
+        )
+        results = []
+        for task, outcome in zip(tasks, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                results.append({
+                    "task_id": task["id"],
+                    "solver": "error", "state": "failed",
+                    "redispatched": 0,
+                    "diagnosis": {"stage": "exception",
+                                  "last_event": type(outcome).__name__,
+                                  "dimension": task.get("dimension")},
+                })
+            else:
+                results.append(outcome)
+        return results
 
     async def _audit(self, task: dict, run: Any) -> dict:
         """auditor 角色：读失败 run 事件流 → 失败阶段分类。
@@ -106,21 +133,22 @@ class OrchestratedWorkbench:
         失败阶段语义：最后事件类型映射（convert 卡死 / extract 读错 /
         验证拒绝）——供学习反射器（B 闭环）消费的失败画像。
         """
-        stage = "unknown"
+        counts: dict[str, int] = {}
         last_type = ""
         try:
-            events = self._app.events(run.id) if hasattr(self._app, "events") \
-                else None
-            if events is not None:
-                async for e in events:
-                    last_type = e.type
-                if "ActionFailed" in last_type or "ActionRejected" in last_type:
-                    stage = "action"
-                elif "RunVerified" in last_type:
-                    stage = "verify"
-                elif last_type:
-                    stage = "loop-exit"
+            async for e in self._app.events(run.id):
+                last_type = e.type
+                counts[e.type] = counts.get(e.type, 0) + 1
+            # 聚合全流分类（终态前恒 RunVerified——只看 last 会全归 verify）
+            if counts.get("ActionFailed", 0) > 0:
+                stage = "action"
+            elif counts.get("ActionRejected", 0) > 0:
+                stage = "rejected"
+            elif last_type:
+                stage = "loop-exit"
+            else:
+                stage = "no-events"
         except Exception:  # noqa: BLE001 — 诊断失败不掩盖原失败
-            pass
+            stage = "unknown"
         return {"stage": stage, "last_event": last_type,
                 "dimension": task.get("dimension")}
