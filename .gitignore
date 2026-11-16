@@ -10,3 +10,7 @@ reports/
 .env
 node_modules/
 agent-sdk-ts/dist/
+
+# MRAG realrun 实验产物（报告入库，库/图不入）
+examples/src/examples/mrag/realrun.db
+examples/src/examples/mrag/realrun_blobs/

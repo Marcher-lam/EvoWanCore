@@ -67,6 +67,12 @@ class LmStudioEmbedding:
             )
             resp.raise_for_status()
             data = resp.json()["data"]
-        # OpenAI 兼容：按 index 保序
+        # OpenAI 兼容：按 index 保序；L2 归一化（真模型不保证单位向量，
+        # 检索的点积=余弦前提由我们兜底）
         ordered = sorted(data, key=lambda d: d["index"])
-        return [d["embedding"] for d in ordered]
+        out = []
+        for d in ordered:
+            v = d["embedding"]
+            norm = math.sqrt(sum(x * x for x in v))
+            out.append([x / norm for x in v] if norm > 0 else v)
+        return out

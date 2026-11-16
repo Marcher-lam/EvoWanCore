@@ -74,14 +74,6 @@ class MRAGStore:
         self._embedder = embedder or HashEmbedding()
         self._schema_ready = False
 
-    def _embedder_signature(self) -> str:
-        """dim + 类型名——索引/查询向量族一致性校验的依据。"""
-        probe = self._embedder._one("probe") if isinstance(
-            self._embedder, HashEmbedding
-        ) else None
-        dim = len(probe) if probe else -1  # 非 Hash 探针需 async，index 时落库
-        return f"{type(self._embedder).__name__}:{dim}"
-
     async def _assert_meta(self) -> None:
         """索引向量族校验：重开库换 embedder（dim 不同）必须显式报错。"""
         async def _sig() -> str:
