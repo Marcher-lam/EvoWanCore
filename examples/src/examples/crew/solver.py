@@ -91,7 +91,14 @@ def make_solver_env(
     async def _submit(args: dict) -> dict:
         env = env_holder["env"]
         assert env and env.current_truth is not None
+        # 27b 怪癖（V3/V4 同款）：tool arguments 可能整体是 JSON 字符串
+        if isinstance(args, str):
+            import json as _json
+            args = _json.loads(args)
         fields = args.get("fields", args)
+        if isinstance(fields, str):
+            import json as _json
+            fields = _json.loads(fields)
         ok, errors = grader(fields, env.current_truth)
         if not ok:
             env.last_errors = list(errors)  # 反射器据此产技能候选

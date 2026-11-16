@@ -46,6 +46,7 @@ async def main() -> int:
     from examples.crew.crew import make_crew
     from examples.crew.learning import CrewMemory
     from examples.crew.solver import make_solver_env
+    from examples.crew.vlm_compat import UserRoleGuard
     from examples.docworkbench.lmstudio_vlm import LMStudioVLM
 
     waves = 3
@@ -53,7 +54,8 @@ async def main() -> int:
         waves = int(sys.argv[sys.argv.index("--waves") + 1])
     use_pipeline = "--pipeline" in sys.argv
 
-    vlm = LMStudioVLM(VLM_MODEL)
+    # UserRoleGuard：qwen3.8 模板要求 user 角色（T4 实测 400 修复）
+    vlm = UserRoleGuard(LMStudioVLM(VLM_MODEL))
     tmp = _BASE / "realrun_ws"
     tmp.mkdir(exist_ok=True)
     mem = CrewMemory(tmp / "crew_mem.db")
