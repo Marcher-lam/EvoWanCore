@@ -23,6 +23,8 @@ from agent_sdk.models import (
     CancelRunResponse,
     EventResponse,
     ExploreResponse,
+    MragQueryRequest,
+    MragQueryResponse,
     PurgeResponse,
     ResumeRunRequest,
     RunStatusResponse,
@@ -310,6 +312,37 @@ class AgentSDKServer:
                 tasks_passed=report.tasks_passed,
                 candidates_generated=report.candidates_generated,
                 budget_spent=report.budget_spent,
+            ).model_dump())
+
+        @routes.post("/mrag/query")
+        async def mrag_query(request: web.Request) -> web.Response:
+            """MRAG 问答/检索（组件 mrag 缺失 → 503，同 explore 惯例）。"""
+            body = MragQueryRequest(**await request.json())
+            mrag = self._components.get("mrag")
+            if mrag is None:
+                return web.json_response(
+                    {"error": "mrag not configured"}, status=503
+                )
+            retrieved = await mrag.retrieve(body.query, k=body.k)
+            hits = [
+                {
+                    "content": c.content, "doc": c.doc, "page": c.page,
+                    "score": round(c.score, 4),
+                    "page_image": c.page_image_path.rsplit("/", 1)[-1],
+                }
+                for c in retrieved
+            ]
+            answer_text, citations = "", []
+            if body.mode == "answer":
+                result = await mrag.answer(body.query, k=body.k)
+                answer_text = result.text
+                citations = [
+                    {"doc": d, "page": p} for d, p in result.citations
+                ]
+            return web.json_response(MragQueryResponse(
+                answer=answer_text,
+                citations=citations,
+                hits=hits,
             ).model_dump())
 
         @routes.delete("/memory/{namespace}/{record_id}")

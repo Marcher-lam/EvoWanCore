@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, field_validator
 
 
@@ -77,3 +79,30 @@ class ExploreResponse(BaseModel):
     tasks_passed: int = 0
     candidates_generated: int = 0
     budget_spent: dict = {}
+
+
+class MragQueryRequest(BaseModel):
+    """MRAG 查询：answer=VLM 带引用生成（默认）；retrieve=仅检索。"""
+
+    query: str
+    k: int = 4
+    mode: Literal["answer", "retrieve"] = "answer"
+
+
+class MragHit(BaseModel):
+    content: str
+    doc: str
+    page: int
+    score: float
+    page_image: str
+
+
+class MragCitation(BaseModel):
+    doc: str
+    page: int
+
+
+class MragQueryResponse(BaseModel):
+    answer: str = ""
+    citations: list[MragCitation] = []
+    hits: list[MragHit] = []
