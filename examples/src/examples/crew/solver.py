@@ -64,11 +64,13 @@ class CrewEnv:
 
 
 def make_solver_env(
-    tmp_path: Path, *, max_steps: int = 8, memory=None,
+    tmp_path: Path, *, max_steps: int = 8, memory=None, vlm=None,
 ) -> CrewEnv:
-    """组装：submit 能力 + CrewFakeModel + AgentRuntime（真内核循环）。
+    """组装：submit 能力 + 模型 + AgentRuntime（真内核循环）。
 
     memory: CrewMemory——接通 B 闭环（规则记忆祈使渲染进模型上下文）。
+    vlm: 模型适配器（默认 CrewFakeModel；realrun 传 LMStudioVLM——
+    Fake 与真模型同契约：capabilities() + infer(InferRequest)）。
     """
     from agent_core.capability import (
         CapabilityDescriptor,
@@ -134,9 +136,9 @@ def make_solver_env(
 
     from examples.crew.fake_model import CrewFakeModel
 
-    fake = CrewFakeModel(env_holder)
+    model = vlm if vlm is not None else CrewFakeModel(env_holder)
     gateway = ModelGateway()
-    gateway.register(fake)
+    gateway.register(model)
 
     class _CrewVerifier:
         async def verify_task(self, task, evidence_refs):
