@@ -100,27 +100,11 @@ async def test_app_level_mrag_endpoint(tmp_path: Path) -> None:
         await server.stop()
 
 
-_PLATFORM_PATHS = [
-    "agent-core/src", "agent-sdk/src", "agent-adapters/src",
-    "agent-explore/src", "agent-evolve/src", "agent-devtools/src",
-    "agent-sdk-ts/src",  # TS SDK 同属平台
-]
-
-
 def test_platform_has_no_mrag_concept() -> None:
-    """架构红线：平台包源码零 mrag 字样（cwd 锚定 + rc 语义，不可空过）。"""
-    import subprocess
+    """架构红线：平台包源码零 mrag 字样（共享 conftest 实现）。"""
+    from conftest import assert_platform_clean
 
-    repo_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        ["git", "grep", "-il", "mrag", "--", *_PLATFORM_PATHS],
-        capture_output=True, text=True, cwd=repo_root,
-    )
-    # rc=0 命中（fail）；rc=1 干净（pass）；其他（git 缺失等）显式报错不静默
-    assert result.returncode != 0 or result.stdout.strip() == "", \
-        f"平台包出现 mrag 概念: {result.stdout.strip()}"
-    if result.returncode not in (0, 1):
-        raise RuntimeError(f"git grep 异常 rc={result.returncode}: {result.stderr}")
+    assert_platform_clean(Path(__file__).resolve().parents[2], "mrag")
 
 
 async def test_mrag_endpoint_503_when_component_missing(tmp_path: Path) -> None:
