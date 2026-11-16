@@ -2,6 +2,7 @@
 
 import {
   CancelRunResponse,
+  MragQueryResponse,
   PurgeResponse,
   RunStatus,
   SdkEvent,
@@ -168,6 +169,16 @@ export class AgentSDKClient {
         if (data) onEvent(JSON.parse(data) as SdkEvent);
       }
     }
+  }
+
+  /** MRAG 问答/检索（服务端需配置 mrag 组件，否则 503）。 */
+  async mragQuery(
+    query: string,
+    opts: { k?: number; mode?: "answer" | "retrieve" } = {},
+  ): Promise<MragQueryResponse> {
+    return this.json("POST", "/mrag/query", {
+      query, k: opts.k ?? 4, mode: opts.mode ?? "answer",
+    });
   }
 
   // ---------- 内部 ----------

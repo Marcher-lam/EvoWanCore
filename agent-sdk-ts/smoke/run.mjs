@@ -140,6 +140,18 @@ async function main() {
       }
     }
 
+    // ---- MRAG 段（V12）：retrieve 模式命中 + answer 引用 ----
+    const mragRetrieve = await client.mragQuery("金额", { mode: "retrieve", k: 2 });
+    assert(mragRetrieve.hits.length >= 1, "MRAG retrieve 应命中");
+    assert(mragRetrieve.answer === "", "retrieve 模式不生成答案");
+    const mragAnswer = await client.mragQuery("金额多少", { mode: "answer", k: 2 });
+    assert(mragAnswer.answer.includes("42"), `答案缺金额: ${mragAnswer.answer}`);
+    assert(
+      mragAnswer.citations.some((c) => c.doc === "smoke.pdf" && c.page === 1),
+      `引用错误: ${JSON.stringify(mragAnswer.citations)}`,
+    );
+    console.log("mrag roundtrip: retrieve + answer citations ok");
+
     console.log("SMOKE PASS ✅");
   } catch (e) {
     fail(e.message);
