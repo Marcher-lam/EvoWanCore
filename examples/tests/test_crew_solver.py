@@ -92,3 +92,49 @@ async def test_evolve_gate_rejects_single_sample_cheater(tmp_path: Path) -> None
         )},
     )
     assert ok is False, "多样本合同必须拒绝单点作弊技能"
+
+
+async def test_v16_realmodel_fixes_regression() -> None:
+    """V16 两个真模型缺陷修复的回归锁定（终评审 M6）。"""
+    # 1) UserRoleGuard：system-only → 插入 user（qwen3.8 模板 400 修复）
+    from agent_core.models import InferRequest, InferResponse, Modality, ModelCapabilities
+    from examples.crew.domain import Invoice
+    from examples.crew.solver import make_solver_env, solve_invoice
+    from examples.crew.vlm_compat import UserRoleGuard
+
+    class _Recording:
+        def __init__(self):
+            self.seen_messages = None
+
+        def capabilities(self):
+            return ModelCapabilities(model_id="m", inputs={Modality.TEXT})
+
+        async def infer(self, request):
+            self.seen_messages = request.messages
+            return InferResponse(text="x")
+
+    rec = _Recording()
+    guard = UserRoleGuard(rec)
+    await guard.infer(InferRequest(
+        model_id="m", messages=[{"role": "system", "content": "sys"}],
+    ))
+    roles = [m["role"] for m in rec.seen_messages]
+    assert "user" in roles, "system-only 必须被注入 user 角色"
+    # 已有 user 时不重复注入
+    await guard.infer(InferRequest(
+        model_id="m",
+        messages=[{"role": "system", "content": "s"},
+                  {"role": "user", "content": "u"}],
+    ))
+    assert [m["role"] for m in rec.seen_messages].count("user") == 1
+
+    # 2) submit 的 str-fields 容错（27b JSON 字符串怪癖）
+    import tempfile
+    from pathlib import Path as _P
+
+    tmp = _P(tempfile.mkdtemp())
+    env = make_solver_env(tmp)
+    inv = Invoice(invoice_id="s1", vendor="v", amount=100.0,
+                  date="2026-10-18", tax_rate=0.06, category="hardware")
+    result = await solve_invoice(env, inv, inv.model_dump())
+    assert result.passed  # 正常路径不受容错层影响

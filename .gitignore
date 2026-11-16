@@ -15,3 +15,4 @@ agent-sdk-ts/dist/
 examples/src/examples/mrag/realrun.db
 examples/src/examples/mrag/realrun_blobs/
 crew_skill_ws/
+examples/src/examples/crew/realrun_ws/

@@ -64,11 +64,13 @@ class CrewEnv:
 
 
 def make_solver_env(
-    tmp_path: Path, *, max_steps: int = 8, memory=None,
+    tmp_path: Path, *, max_steps: int = 8, memory=None, vlm=None,
 ) -> CrewEnv:
-    """组装：submit 能力 + CrewFakeModel + AgentRuntime（真内核循环）。
+    """组装：submit 能力 + 模型 + AgentRuntime（真内核循环）。
 
     memory: CrewMemory——接通 B 闭环（规则记忆祈使渲染进模型上下文）。
+    vlm: 模型适配器（默认 CrewFakeModel；realrun 传 LMStudioVLM——
+    Fake 与真模型同契约：capabilities() + infer(InferRequest)）。
     """
     from agent_core.capability import (
         CapabilityDescriptor,
@@ -86,9 +88,26 @@ def make_solver_env(
     registry = InMemoryCapabilityRegistry()
     env_holder: dict[str, CrewEnv] = {}
 
+    def _as_dict(args):
+        """27b 怪癖（V3/V4 同款）：tool arguments 可能是 JSON 字符串。"""
+        import json as _json
+
+        value = args
+        for _ in range(2):  # 双层（整体 str + 字段 str）
+            if isinstance(value, str):
+                try:
+                    value = _json.loads(value)
+                except ValueError:
+                    env = env_holder["env"]
+                    if env is not None:
+                        env.last_errors = ["malformed_json"]
+                    return {"__malformed__": True}
+        return value
+
     async def _submit(args: dict) -> dict:
         env = env_holder["env"]
         assert env and env.current_truth is not None
+        args = _as_dict(args)
         fields = args.get("fields", args)
         ok, errors = grader(fields, env.current_truth)
         if not ok:
@@ -108,6 +127,7 @@ def make_solver_env(
 
     async def _classify(args: dict) -> dict:
         env = env_holder["env"]
+        args = _as_dict(args)
         env.last_classification = dict(args.get("result", args))
         env.stage_pass = True
         return {"ok": True}
@@ -121,6 +141,7 @@ def make_solver_env(
 
     async def _audit(args: dict) -> dict:
         env = env_holder["env"]
+        args = _as_dict(args)
         env.last_audit = dict(args.get("result", args))
         env.stage_pass = True
         return {"ok": True}
@@ -134,9 +155,9 @@ def make_solver_env(
 
     from examples.crew.fake_model import CrewFakeModel
 
-    fake = CrewFakeModel(env_holder)
+    model = vlm if vlm is not None else CrewFakeModel(env_holder)
     gateway = ModelGateway()
-    gateway.register(fake)
+    gateway.register(model)
 
     class _CrewVerifier:
         async def verify_task(self, task, evidence_refs):
