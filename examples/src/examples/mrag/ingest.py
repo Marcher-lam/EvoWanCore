@@ -27,17 +27,23 @@ class PageDescriber:
         data_url = (
             "data:image/png;base64," + base64.b64encode(png).decode()
         )
-        request = {
-            "model_id": self._vlm.capabilities().model_id,
-            "messages": [{
-                "role": "user",
-                "content": f"{_DESCRIBE_PROMPT}\n![page]({data_url})",
-            }],
-        }
-        from agent_core.models import InferRequest
+        from agent_core.models import InferRequest, Modality
 
-        resp = await self._vlm.infer(InferRequest(**request))
-        return resp.text or ""
+        # 图像走 OpenAI content part（项目真实多模态契约——见
+        # driver.py 的 image_url 构造；markdown 内嵌字符串 VLM 不解析）
+        request = InferRequest(
+            model_id=self._vlm.capabilities().model_id,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _DESCRIBE_PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            modalities=[Modality.TEXT, Modality.IMAGE],
+        )
+        resp = await self._vlm.infer(request)
+        return (resp.text or "").strip()
 
 
 async def ingest(store: MRAGStore, doc: SourceDoc, describer: PageDescriber) -> int:

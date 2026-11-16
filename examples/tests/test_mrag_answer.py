@@ -75,15 +75,74 @@ async def test_capabilities_registered_with_redlines(tmp_path: Path) -> None:
     answerer = VLMAnswerer(_ScriptedVLM(lambda p: "x"))
 
     registry = InMemoryCapabilityRegistry()
-    register_mrag_tools(registry, store, answerer)
+    vlm = _ScriptedVLM(lambda p: "x")
+    register_mrag_tools(registry, store, answerer, vlm)
 
     by_id = {d.id: d for d in registry.discover({})}
     assert by_id["mrag_query"].side_effect_level == "read"
     assert by_id["mrag_query"].auth_scope == []
     assert by_id["mrag_ingest"].side_effect_level == "write", \
         "ingest 改索引——必须如实声明 write"
-    # handler 真通：query → retrieve JSON
-    handler = registry._bindings["mrag_query"]  # noqa: SLF001 — 测试取绑定
+    # handler 真通：query → retrieve JSON（公共 handler_for，不触私有）
+    handler = registry.handler_for("mrag_query")
     result = await handler({"query": "总金额", "k": 2})
     assert len(result["hits"]) == 2
     assert all("content" in h and "page" in h for h in result["hits"])
+
+
+# ---------- V11 终评审追加：ingest handler 安全面 + 短查询 ----------
+
+async def test_ingest_handler_path_traversal_rejected(tmp_path: Path) -> None:
+    """页面路径越界（绝对/穿越）与缺失 → 显式错误，绝不读宿主文件。"""
+    import pytest
+    from agent_core.capability import InMemoryCapabilityRegistry
+    from examples.mrag.answer import VLMAnswerer
+    from examples.mrag.capabilities import register_mrag_tools
+
+    store = await _seed_store(tmp_path)
+    registry = InMemoryCapabilityRegistry()
+    register_mrag_tools(
+        registry, store, VLMAnswerer(_ScriptedVLM(lambda p: "d")), 
+        _ScriptedVLM(lambda p: "d"),
+    )
+    ingest_h = registry.handler_for("mrag_ingest")
+    # 绝对路径指向库外（模拟 ~/.ssh/id_rsa 外泄通道）
+    with pytest.raises(ValueError, match="越界"):
+        await ingest_h({"doc_name": "evil",
+                        "page_image_paths": ["/etc/hosts"]})
+    with pytest.raises(ValueError, match="越界"):
+        await ingest_h({"doc_name": "evil",
+                        "page_image_paths": ["../../../../etc/hosts"]})
+    with pytest.raises(FileNotFoundError):
+        await ingest_h({"doc_name": "x", "page_image_paths": ["ghost.png"]})
+    with pytest.raises(ValueError, match="至少其一非空"):
+        await ingest_h({"doc_name": "x", "page_image_paths": []})
+
+
+async def test_ingest_handler_within_blobs_ok(tmp_path: Path) -> None:
+    """blobs_dir 内的相对路径正常入库（合法路径不被守卫误伤）。"""
+    from agent_core.capability import InMemoryCapabilityRegistry
+    from examples.mrag.answer import VLMAnswerer
+    from examples.mrag.capabilities import register_mrag_tools
+
+    store = await _seed_store(tmp_path)
+    # 先落一张合法页面图进 blobs_dir
+    (tmp_path / "b").mkdir(exist_ok=True)
+    (tmp_path / "b" / "extra_p1.png").write_bytes(_png(9))
+    registry = InMemoryCapabilityRegistry()
+    vlm = _ScriptedVLM(lambda p: "补充页描述")
+    register_mrag_tools(registry, store, VLMAnswerer(vlm), vlm)
+    result = await registry.handler_for("mrag_ingest")({
+        "doc_name": "extra.pdf",
+        "page_image_paths": ["extra_p1.png"],
+        "text": "第1页：补充材料。",
+    })
+    assert result["indexed_chunks"] >= 2
+
+
+async def test_short_query_two_char_hits(tmp_path: Path) -> None:
+    """二字中文查询（'房费'）非零分命中——1/2-gram 并集的验收。"""
+    store = await _seed_store(tmp_path)
+    hits = await store.retrieve("房费", k=3)
+    assert hits and hits[0].score > 0.0, "二字查询不得全零分退化"
+    assert "800" in hits[0].content or "房费" in hits[0].content

@@ -43,8 +43,13 @@ async def test_describer_prompt_contains_image(tmp_path: Path) -> None:
     desc = await d.describe(_png(1))
     assert "FAKE-DESC 含图" in desc, f"VLM 未收到图像: {desc}"
     req = vlm.requests[0]
-    payload = str(req.messages)
-    assert "data:image/png;base64," in payload, "图像必须以 data URL 注入提示词"
+    content = req.messages[0]["content"]
+    assert isinstance(content, list), f"content 必须是 parts 列表（OpenAI 契约）: {type(content)}"
+    parts = {p["type"] for p in content}
+    assert "text" in parts and "image_url" in parts
+    img = next(p for p in content if p["type"] == "image_url")
+    assert img["image_url"]["url"].startswith("data:image/png;base64,"), \
+        "图像必须走 image_url content part（真实 VLM 不解析 markdown 内嵌）"
 
 
 async def test_ingest_end_to_end_chunks(tmp_path: Path) -> None:

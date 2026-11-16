@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from examples.mrag.embed import HashEmbedding
+from examples.mrag.embed import EmbeddingProvider, HashEmbedding
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -27,6 +28,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     page_image_path TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -48,24 +53,61 @@ class RetrievedChunk:
     page_image_path: str
 
 
-def _sentences(text: str) -> list[str]:
-    """按句/换行切段，滤空白；段长上限 200 字符兜底。"""
+def _sentences(text: str, max_len: int = 200) -> list[str]:
+    """按句/换行切段；超长段切续块（内容不丢弃——长表行是核心语料）。"""
     parts = re.split(r"(?<=[。．!？?\n])", text)
     out = []
     for p in parts:
         p = p.strip()
-        if p:
-            out.append(p if len(p) <= 200 else p[:200])
+        if not p:
+            continue
+        for i in range(0, len(p), max_len):
+            out.append(p[i:i + max_len])
     return out
 
 
 class MRAGStore:
     def __init__(self, db_path: Path | str, blobs_dir: Path | str,
-                 embedder: HashEmbedding | None = None) -> None:
+                 embedder: EmbeddingProvider | None = None) -> None:
         self.db_path = Path(db_path)
         self.blobs_dir = Path(blobs_dir)
         self._embedder = embedder or HashEmbedding()
         self._schema_ready = False
+
+    def _embedder_signature(self) -> str:
+        """dim + 类型名——索引/查询向量族一致性校验的依据。"""
+        probe = self._embedder._one("probe") if isinstance(
+            self._embedder, HashEmbedding
+        ) else None
+        dim = len(probe) if probe else -1  # 非 Hash 探针需 async，index 时落库
+        return f"{type(self._embedder).__name__}:{dim}"
+
+    async def _assert_meta(self) -> None:
+        """索引向量族校验：重开库换 embedder（dim 不同）必须显式报错。"""
+        async def _sig() -> str:
+            (v,) = await self._embedder.embed(["probe"])
+            return f"{type(self._embedder).__name__}:{len(v)}"
+
+        signature = await _sig()
+        conn = await self._connect()
+        try:
+            cur = await conn.execute(
+                "SELECT value FROM meta WHERE key = 'embedder'"
+            )
+            row = await cur.fetchone()
+            if row is None:
+                await conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('embedder', ?)",
+                    (signature,),
+                )
+                await conn.commit()
+            elif row[0] != signature:
+                raise RuntimeError(
+                    f"索引库向量族不匹配：库为 {row[0]}，当前 {signature}。"
+                    "换 embedder 需新库或重建索引。"
+                )
+        finally:
+            await conn.close()
 
     async def _connect(self) -> aiosqlite.Connection:
         conn = await aiosqlite.connect(self.db_path)
@@ -80,6 +122,7 @@ class MRAGStore:
     ) -> int:
         """建块→落图→向量化→入库。返回入库块数。"""
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
+        await self._assert_meta()
         image_paths: dict[int, str] = {}
         for page_no, png in doc.pages:
             path = self.blobs_dir / f"{_slug(doc.name)}_p{page_no}.png"
@@ -87,20 +130,27 @@ class MRAGStore:
             image_paths[page_no] = str(path)
 
         rows: list[tuple[str, int, str, str, str]] = []  # doc/page/kind/content/img
-        for i, desc in enumerate(page_descriptions):
-            page_no = doc.pages[i][0] if i < len(doc.pages) else 1
-            rows.append((doc.name, page_no, "page_desc", desc,
-                         image_paths.get(page_no, "")))
-        # 文本块从全文按句切；页归属按'第N页'前缀（_page_of）
+        # 描述数必须与页数对齐（错位会让页归属系统性错位）
+        for (page_no, _png), desc in zip(
+            doc.pages, page_descriptions, strict=True
+        ):
+            if desc.strip():  # 空描述不入库（会以均匀向量污染 top-k）
+                rows.append((doc.name, page_no, "page_desc", desc.strip(),
+                             image_paths.get(page_no, "")))
+        # 文本块按句切；页归属='第N页'标记携带最近页（无标记沿用上一句的页）
+        last_page = doc.pages[0][0] if doc.pages else 1
         for sent in _sentences(doc.text):
-            page_no = _page_of(sent, doc.pages)
+            page_no = _page_of(sent, doc.pages, last_page)
+            last_page = page_no
             rows.append((doc.name, page_no, "text", sent,
                          image_paths.get(page_no, "")))
 
         contents = [r[3] for r in rows]
-        vecs = await self._embedder.embed(contents)
+        vecs = await self._embedder.embed(contents) if contents else []
         conn = await self._connect()
         try:
+            # 同 doc 重 ingest 先清旧块（top-k 不得出现重复块）
+            await conn.execute("DELETE FROM chunks WHERE doc = ?", (doc.name,))
             for row, vec in zip(rows, vecs, strict=True):
                 await conn.execute(
                     "INSERT INTO chunks (doc, page, kind, content, vec,"
@@ -138,15 +188,21 @@ class MRAGStore:
 
 
 def _slug(name: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9_\-]+", "_", name)
-    return base.strip("_") or "doc"
+    base = re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_") or "doc"
+    # 加 name 哈希后缀：'a b.pdf' 与 'a:b.pdf' 不得共享 blob 互相覆写
+    digest = hashlib.sha256(name.encode()).hexdigest()[:6]
+    return f"{base}_{digest}"
 
 
-def _page_of(sentence: str, pages: list[tuple[int, bytes]]) -> int:
-    """中文文本前缀'第N页'归属；无标记 → 首页。"""
+def _page_of(
+    sentence: str, pages: list[tuple[int, bytes]], last_page: int
+) -> int:
+    """'第N页'标记页归属；无标记沿用最近标记页（首页兜底）。"""
     m = re.match(r"第(\d+)页", sentence)
     if m:
         n = int(m.group(1))
         if any(p == n for p, _ in pages):
             return n
-    return pages[0][0] if pages else 1
+    return last_page if any(p == last_page for p, _ in pages) else (
+        pages[0][0] if pages else 1
+    )

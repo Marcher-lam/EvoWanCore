@@ -32,13 +32,15 @@ class HashEmbedding:
 
     def _one(self, text: str) -> list[float]:
         vec = [0.0] * self._dim
-        # 滑窗 n-gram 分桶：短文本也有多桶信号（而非整句一桶）
-        for i in range(len(text)):
-            gram = text[i:i + 3]
-            bucket = int.from_bytes(
-                hashlib.sha256(gram.encode()).digest()[:8], "big"
-            ) % self._dim
-            vec[bucket] += 1.0
+        # 1..3-gram 并集分桶：中文二字查询（"金额""房费"）也有信号——
+        # 仅 3-gram 时 <3 字查询全零分（终评审实测）
+        for n in (1, 2, 3):
+            for i in range(len(text) - n + 1):
+                gram = text[i:i + n]
+                bucket = int.from_bytes(
+                    hashlib.sha256(gram.encode()).digest()[:8], "big"
+                ) % self._dim
+                vec[bucket] += 1.0
         norm = math.sqrt(sum(x * x for x in vec))
         if norm == 0:  # 空文本：均匀向量（零信息但不炸检索）
             return [1.0 / math.sqrt(self._dim)] * self._dim

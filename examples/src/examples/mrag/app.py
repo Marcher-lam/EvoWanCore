@@ -22,7 +22,7 @@ class MRAGApp:
         *,
         db_path: Path | str,
         blobs_dir: Path | str,
-        embedder: HashEmbedding | None = None,
+        embedder: object | None = None,  # EmbeddingProvider 协议
         vlm: Any,
     ) -> None:
         self.store = MRAGStore(db_path, blobs_dir, embedder or HashEmbedding())
@@ -43,4 +43,4 @@ class MRAGApp:
         """接入能力目录——AgentRuntime 即可调用 mrag_query/mrag_ingest。"""
         from examples.mrag.capabilities import register_mrag_tools
 
-        register_mrag_tools(registry, self.store, self.answerer)
+        register_mrag_tools(registry, self.store, self.answerer, self.vlm)

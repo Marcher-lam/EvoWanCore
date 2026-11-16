@@ -71,9 +71,8 @@ async def test_mrag_full_chain(tmp_path: Path) -> None:
     # 生成：答案必须引用正确文档页
     answer = await app.answer("打车花了多少钱？")
     assert "expense.pdf" in answer.text
-    assert ("expense.pdf", 2) in answer.citations or \
-        ("expense.pdf", hits[0].page) in answer.citations, \
-        f"引用页错误: {answer.citations}"
+    assert ("expense.pdf", 2) in answer.citations, \
+        f"出租车发票在第 2 页——引用页错误: {answer.citations}"
 
 
 async def test_mrag_app_registers_capabilities(tmp_path: Path) -> None:

@@ -23,12 +23,21 @@ class Answer:
     citations: list[tuple[str, int]]  # [(doc, page)] 去重保序
 
 
-def parse_citations(text: str) -> list[tuple[str, int]]:
-    """从答案文本解析 [doc p.N] 引用（去重保序）。"""
+def parse_citations(
+    text: str, retrieved: list[RetrievedChunk] | None = None
+) -> list[tuple[str, int]]:
+    """解析 [doc p.N] 引用（去重保序）。
+
+    传入 retrieved 时只保留真实检索到的 (doc, page)——模型不得引用
+    未提供的材料（幻觉引用过滤）。
+    """
+    allowed = (
+        {(c.doc, c.page) for c in retrieved} if retrieved is not None else None
+    )
     out: list[tuple[str, int]] = []
-    for m in re.finditer(r"\[([^\]\s]+)\s+p\.(\d+)\]", text):
-        item = (m.group(1), int(m.group(2)))
-        if item not in out:
+    for m in re.finditer(r"\[([^\]]+?)\s+p\.(\d+)\]", text):
+        item = (m.group(1).strip(), int(m.group(2)))
+        if item not in out and (allowed is None or item in allowed):
             out.append(item)
     return out
 
@@ -40,26 +49,35 @@ class VLMAnswerer:
     async def answer(self, query: str, retrieved: list[RetrievedChunk]) -> Answer:
         if not retrieved:
             return Answer(text="材料中未包含相关信息。", citations=[])
-        parts: list[str] = [_ANSWER_PROMPT, f"问题：{query}\n\n检索块："]
+        blocks: list[str] = [_ANSWER_PROMPT, f"问题：{query}\n\n检索块："]
         for i, chunk in enumerate(retrieved, 1):
-            parts.append(
+            blocks.append(
                 f"[{i}] ({chunk.doc} p.{chunk.page}, 相关度 {chunk.score:.3f}) "
                 f"{chunk.content}"
             )
-        # 多模态证据：首命中的页面图像附给 VLM（视觉上下文）
+        blocks.append(f"\n请回答：{query}")
+        content: list[dict] = [
+            {"type": "text", "text": "\n".join(blocks)}
+        ]
+        # 多模态证据：首命中页面图像以 OpenAI content part 附给 VLM
         first_img = next(
             (c.page_image_path for c in retrieved if c.page_image_path), None
         )
         if first_img and Path(first_img).exists():
             b64 = base64.b64encode(Path(first_img).read_bytes()).decode()
-            parts.append(f"\n首命中页面图像：\n![page](data:image/png;base64,{b64})")
-        parts.append(f"\n请回答：{query}")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+            })
 
-        from agent_core.models import InferRequest
+        from agent_core.models import InferRequest, Modality
 
         resp = await self._vlm.infer(InferRequest(
             model_id=self._vlm.capabilities().model_id,
-            messages=[{"role": "user", "content": "\n".join(parts)}],
+            messages=[{"role": "user", "content": content}],
+            modalities=[Modality.TEXT, Modality.IMAGE],
         ))
-        text = resp.text or ""
-        return Answer(text=text, citations=parse_citations(text))
+        text = (resp.text or "").strip()
+        return Answer(
+            text=text, citations=parse_citations(text, retrieved)
+        )
