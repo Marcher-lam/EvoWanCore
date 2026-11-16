@@ -57,3 +57,21 @@ def _num_eq(a: object, b: float) -> bool:
         return abs(float(a) - b) < 1e-9  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return False
+
+
+def dirty_payloads(inv: Invoice, modes: list[str]) -> dict:
+    """复合脏：多模式叠加（单模式场景仍用 dirty_payload）。"""
+    payload = inv.model_dump()
+    for mode in modes:
+        d = dirty_payload(inv, mode)
+        for k, v in d.items():
+            if k == "amount" and isinstance(v, str) or k != "amount":
+                payload[k] = v
+    # date 模式单独处理（dirty_payload 会覆写整个 date）
+    if "date_format" in modes:
+        payload["date"] = inv.date.replace("-", "/")
+    if "currency_symbol" in modes:
+        raw = f"￥{inv.amount:,.0f}"
+        payload["amount"] = raw
+        payload["amount_raw"] = raw
+    return payload

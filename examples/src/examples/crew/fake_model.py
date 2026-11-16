@@ -33,6 +33,18 @@ def _dirty_modes(payload: dict) -> list[str]:
     return modes
 
 
+def _memory_actions(messages: list[dict]) -> list[str]:
+    """从 Relevant memory 提取 MANDATORY call 技能清单（学习感知面）。"""
+    import re as _re
+
+    actions: list[str] = []
+    for m in messages:
+        text = str(m.get("content", ""))
+        if "MANDATORY: call" in text:
+            actions.extend(_re.findall(r"MANDATORY: call (\w+)", text))
+    return actions
+
+
 class CrewFakeModel:
     def __init__(self, env_holder: dict) -> None:
         self._env_holder = env_holder
@@ -50,8 +62,51 @@ class CrewFakeModel:
         return self._caps
 
     async def infer(self, request: InferRequest) -> InferResponse:
+        # 角色路由：classify/audit 阶段走角色剧本（kind 在 system prompt）
+        system_text = " ".join(
+            str(m.get("content", "")) for m in request.messages
+            if m.get("role") == "system"
+        )
+        # 角色剧本历史感知：本阶段已提交 → text 终止（否则烧满 max_steps）
+        history = [
+            m for m in request.messages
+            if m.get("role") == "user"
+            and str(m.get("content", "")).startswith("[action]")
+        ]
+        if "Task kind: classify" in system_text:
+            if any("submit_classification" in str(h.get("content"))
+                   for h in history):
+                return InferResponse(text="done")
+            payload = _extract_payload(request.messages)
+            return InferResponse(tool_calls=[{
+                "id": "cls", "name": "submit_classification",
+                "arguments": {"result": {
+                    "category": payload.get("category", "hardware"),
+                    "dirty_pred": _dirty_modes(payload),
+                }},
+            }])
+        if "Task kind: audit" in system_text:
+            if any("submit_audit" in str(h.get("content"))
+                   for h in history):
+                return InferResponse(text="done")
+            payload = _extract_payload(request.messages)
+            amount = payload.get("amount")
+            try:
+                large = float(str(amount).replace("￥", "")
+                              .replace(",", "")) >= 800.0
+            except (TypeError, ValueError):
+                large = False
+            return InferResponse(tool_calls=[{
+                "id": "aud", "name": "submit_audit",
+                "arguments": {"result": {
+                    "needs_review": large,
+                    "reason": "金额超单笔上限" if large else "对账一致",
+                }},
+            }])
+
         payload = _extract_payload(request.messages)
         dirty = _dirty_modes(payload)
+        memory_actions = _memory_actions(request.messages)
         tool_ids = {
             t["function"]["name"] for t in (request.tools or [])
         }
@@ -76,16 +131,36 @@ class CrewFakeModel:
             "tax_rate": payload.get("tax_rate"),
         }
 
+        # 学习感知：多脏 + 记忆含相关 MANDATORY 技能 → 依记忆依次全调
+        # （无记忆时逐个试探——中途半修提交被拒，弯路即学习增益的度量）
+        memory_covered = {
+            SKILL_FOR_MODE[m] for m in dirty
+        } & set(memory_actions) if len(dirty) > 1 else set()
+
+        def _pending() -> list[str]:
+            """尚未调用过的脏模式技能（按 history 推断）。"""
+            called = {
+                cap for cap in (SKILL_FOR_MODE[m] for m in dirty)
+                if any(
+                    str(h.get("content", "")).startswith(f"[action] {cap}(")
+                    for h in history
+                )
+            }
+            return [
+                m for m in dirty
+                if SKILL_FOR_MODE[m] in tool_ids
+                and SKILL_FOR_MODE[m] not in called
+            ]
+
         if n == 0:
             if not dirty:
                 return _submit(clean_fields)  # 干净：1 步直通
             skillable = [
                 m for m in dirty if SKILL_FOR_MODE[m] in tool_ids
             ]
-            if skillable:  # 有技能：先调第一个可用技能
+            if skillable:
                 cap = SKILL_FOR_MODE[skillable[0]]
-                args = {"value": _dirty_value(payload, skillable[0])}
-                return _call(cap, args)
+                return _call(cap, {"value": _dirty_value(payload, skillable[0])})
             return _submit(clean_fields)  # 无技能：原样交（被拒）
         # n>0：看最近动作
         last = str(history[-1]["content"])
@@ -94,8 +169,15 @@ class CrewFakeModel:
                 last.startswith(f"[action] {SKILL_FOR_MODE[m]}(")
                 for m in dirty
             ):
-                # 技能刚执行完：字段取技能真实沙箱输出（缺失则原样——
-                # 技能无效时提交脏值被拒，指标如实反映）
+                # 技能刚执行完。有记忆（全调总则）→ 未调技能继续调，
+                # 不半修提交；无记忆 → 立即提交半修值（被拒——弯路）
+                pending = _pending()
+                if pending and memory_covered:
+                    return _call(
+                        SKILL_FOR_MODE[pending[0]],
+                        {"value": _dirty_value(payload, pending[0])},
+                    )
+                # 全部技能已调（或无记忆单脏）：字段取真实沙箱输出提交
                 fields = {
                     "amount": payload.get("amount"),
                     "date": payload.get("date"),
@@ -114,14 +196,15 @@ class CrewFakeModel:
                 return _submit(fields)
             # submit 已成功（本不应到——succeeded 后 policy 结束）
             return InferResponse(text="done")
-        # 最近失败（submit 被拒）
+        # 最近失败（submit 被拒）。无记忆试探路径：还有未调技能 → 补调
+        pending = _pending()
+        if pending:
+            return _call(
+                SKILL_FOR_MODE[pending[0]],
+                {"value": _dirty_value(payload, pending[0])},
+            )
         if n >= 3:
             return InferResponse(text="give up")  # 三拒放弃
-        skillable = [m for m in dirty if SKILL_FOR_MODE[m] in tool_ids]
-        if skillable and n == 1:
-            # 第二次尝试：仍有技能没用（多脏模式场景）→ 调下一个技能
-            cap = SKILL_FOR_MODE[skillable[0]]
-            return _call(cap, {"value": _dirty_value(payload, skillable[0])})
         # 瞎改一版再交（仍错——脏值无法凭空修复）
         wrong = dict(clean_fields)
         if "date_format" in dirty:
