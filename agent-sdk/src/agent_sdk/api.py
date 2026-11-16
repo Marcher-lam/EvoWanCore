@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from aiohttp import web
@@ -23,8 +23,6 @@ from agent_sdk.models import (
     CancelRunResponse,
     EventResponse,
     ExploreResponse,
-    MragQueryRequest,
-    MragQueryResponse,
     PurgeResponse,
     ResumeRunRequest,
     RunStatusResponse,
@@ -32,6 +30,9 @@ from agent_sdk.models import (
 )
 
 AppFactory = Callable[[], dict[str, Any]]
+
+# 组件注入 app state 的键（AppKey：类型安全 + 消 NotAppKeyWarning）
+SDK_COMPONENTS: web.AppKey[dict[str, Any]] = web.AppKey("sdk_components")
 
 
 @web.middleware
@@ -72,12 +73,15 @@ class AgentSDKServer:
     def __init__(self, app_factory: AppFactory, host: str = "127.0.0.1",
                  port: int = 8300, sse_poll_s: float = 0.05,
                  sse_heartbeat_s: float = 5.0,
-                 auth_token: str | None = None) -> None:
+                 auth_token: str | None = None,
+                 extra_routes: Iterable[web.AbstractRouteDef] | None = None,
+    ) -> None:
         self._factory = app_factory
         self._host = host
         self._port = port
         self._sse_poll_s = sse_poll_s
         self._sse_heartbeat_s = sse_heartbeat_s
+        self._extra_routes = extra_routes
         if auth_token is not None:
             if not auth_token:
                 raise ValueError("auth_token 不能为空串（会全站恒 401）")
@@ -314,37 +318,6 @@ class AgentSDKServer:
                 budget_spent=report.budget_spent,
             ).model_dump())
 
-        @routes.post("/mrag/query")
-        async def mrag_query(request: web.Request) -> web.Response:
-            """MRAG 问答/检索（组件 mrag 缺失 → 503，同 explore 惯例）。"""
-            body = MragQueryRequest(**await request.json())
-            mrag = self._components.get("mrag")
-            if mrag is None:
-                return web.json_response(
-                    {"error": "mrag not configured"}, status=503
-                )
-            retrieved = await mrag.retrieve(body.query, k=body.k)
-            hits = [
-                {
-                    "content": c.content, "doc": c.doc, "page": c.page,
-                    "score": round(c.score, 4),
-                    "page_image": c.page_image_path.rsplit("/", 1)[-1],
-                }
-                for c in retrieved
-            ]
-            answer_text, citations = "", []
-            if body.mode == "answer":
-                result = await mrag.answer(body.query, k=body.k)
-                answer_text = result.text
-                citations = [
-                    {"doc": d, "page": p} for d, p in result.citations
-                ]
-            return web.json_response(MragQueryResponse(
-                answer=answer_text,
-                citations=citations,
-                hits=hits,
-            ).model_dump())
-
         @routes.delete("/memory/{namespace}/{record_id}")
         async def purge_memory(request: web.Request) -> web.Response:
             ns = request.match_info["namespace"]
@@ -380,7 +353,15 @@ class AgentSDKServer:
         if self._auth_token is not None:  # 鉴权先于业务（含 400 解析）
             middlewares.insert(0, _make_auth_guard(self._auth_token))
         app = web.Application(middlewares=middlewares)
+        # 组件注入 app state：extra_routes 应用路由经
+        # request.app["sdk_components"] 取组件（通用机制，零应用概念）
+        app[SDK_COMPONENTS] = self._components
         app.add_routes(self._routes())
+        if self._extra_routes is not None:
+            # 二次开发应用的自有路由：挂进同一 app——自动享受
+            # 鉴权/400 守卫（平台不知道应用，应用吃平台治理）。
+            # 注意：平台既有路径不可覆盖（先注册先匹配，静默失效）。
+            app.add_routes(self._extra_routes)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
