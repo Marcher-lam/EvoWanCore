@@ -99,6 +99,14 @@ async def register_skill_for_mode(
     artifact = build_artifact(
         mode, version=f"0.{generation}.0", scripts=scripts,
     )
+    # 探索反例：边界值追加进合同（闰年/零额等——锁住边界作弊）
+    from examples.crew.explore import counterexample_cases
+
+    artifact = artifact.model_copy(update={
+        "expected_outputs": {
+            **artifact.expected_outputs, **counterexample_cases(mode),
+        },
+    })
     sandbox = SkillSandbox(workspace, network="deny")
     contract = await sandbox.contract_test(artifact)
     if not contract.passed:
