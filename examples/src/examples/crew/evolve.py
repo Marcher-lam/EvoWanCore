@@ -112,5 +112,24 @@ async def register_skill_for_mode(
     if not contract.passed:
         return False
     bridge = SkillRegistryBridge(sandbox=sandbox, registry=env.registry)
-    bridge.register(artifact)
+    descriptor = bridge.register(artifact)
+
+    # V17 真跑实测：tool-first 引导后 27b 真调技能——但平台 bridge 的
+    # handler 不容错 str arguments（27b JSON 字符串怪癖全工具一致）。
+    # 应用层 rebind 包装（平台零侵入）：str → json.loads 后转调原 handler。
+    inner = env.registry.handler_for(descriptor.id)
+
+    async def _str_tolerant(args):
+        import json as _json
+
+        value = args
+        for _ in range(2):
+            if isinstance(value, str):
+                try:
+                    value = _json.loads(value)
+                except ValueError:
+                    return {"error": "malformed arguments"}
+        return await inner(value)
+
+    env.registry.rebind(descriptor, _str_tolerant)
     return True
