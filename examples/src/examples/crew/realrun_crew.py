@@ -53,6 +53,7 @@ async def main() -> int:
     if "--waves" in sys.argv:
         waves = int(sys.argv[sys.argv.index("--waves") + 1])
     use_pipeline = "--pipeline" in sys.argv
+    tool_first = "--tool-first" in sys.argv
 
     # UserRoleGuard：qwen3.8 模板要求 user 角色（T4 实测 400 修复）
     vlm = UserRoleGuard(LMStudioVLM(VLM_MODEL))
@@ -62,10 +63,13 @@ async def main() -> int:
     env = make_solver_env(
         tmp, memory=mem, vlm=vlm, max_steps=12,
     )
-    crew = make_crew(env, workspace=tmp / "skills", memory=mem)
+    crew = make_crew(
+        env, workspace=tmp / "skills", memory=mem, tool_first=tool_first,
+    )
 
     batch = _batch()
-    print(f"[realrun] 27b={VLM_MODEL} waves={waves} pipeline={use_pipeline}")
+    print(f"[realrun] 27b={VLM_MODEL} waves={waves} "
+          f"pipeline={use_pipeline} tool_first={tool_first}")
     print(f"[realrun] batch={len(batch)} 票；ingest 学习/进化全链……")
 
     metrics = await crew.run_waves(
@@ -76,7 +80,8 @@ async def main() -> int:
         "# crew 真实链路报告（27b）",
         "",
         f"- VLM: `{VLM_MODEL}`（reasoning_effort=low）",
-        f"- waves: {waves}；pipeline: {use_pipeline}；批: {len(batch)} 票",
+        f"- waves: {waves}；pipeline: {use_pipeline}；"
+        f"tool_first: {tool_first}；批: {len(batch)} 票",
         "",
         "| wave | 成功率 | 平均步数 | 被拒 | 技能 | 自愈 | 需复核 |",
         "|---|---|---|---|---|---|---|",

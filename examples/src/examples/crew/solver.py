@@ -108,7 +108,10 @@ def make_solver_env(
         env = env_holder["env"]
         assert env and env.current_truth is not None
         args = _as_dict(args)
-        fields = args.get("fields", args)
+        fields = _as_dict(args.get("fields", args))
+        if fields.get("__malformed__"):
+            env.last_errors = ["malformed_json"]
+            raise ValueError("REJECTED:malformed_json")
         ok, errors = grader(fields, env.current_truth)
         if not ok:
             env.last_errors = list(errors)  # 反射器据此产技能候选

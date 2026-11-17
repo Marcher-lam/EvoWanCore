@@ -51,7 +51,7 @@ class InvoiceOpsCrew:
     """
 
     def __init__(self, env: CrewEnv, *, workspace: Path,
-                 memory=None) -> None:
+                 memory=None, tool_first: bool = False) -> None:
         from agent_core.orchestration import (
             CapabilityCompositionPolicy,
             Orchestrator,
@@ -60,6 +60,9 @@ class InvoiceOpsCrew:
         self._env = env
         self._workspace = workspace
         self._memory = memory  # B 闭环记忆（学习全链的存储侧）
+        # V17 工具优先：goal 注入指令——真 27b 实测倾向自己心算归一化
+        # 而绕过已进化技能（V16 realrun wave2/3 成功率回落根因）
+        self._tool_first = tool_first
         self._evolved: set[str] = set()
         self._generation = 0
         self._agents = crew_agents()
@@ -174,6 +177,12 @@ class InvoiceOpsCrew:
         self._env.stage_pass = False
         goal = {"payload": payload,
                 "classification": self._env.last_classification}
+        if self._tool_first:
+            goal["instruction"] = (
+                "TOOL-FIRST 工具优先：提交字段前，若 tools 中存在与脏字段"
+                "对应的归一化技能（normalize_*/correct_*），必须先调用该"
+                "技能取得输出，再以技能输出构造 fields 提交——禁止自行心算。"
+            )
         states = await self._orchestrator.orchestrate(
             _task("invoice_extract", goal), self._agents,
         )
@@ -214,9 +223,16 @@ class InvoiceOpsCrew:
         from agent_core.task import TaskSpec
 
         self._env.reset_for(inv)
+        goal: dict = {"payload": payload}
+        if self._tool_first:
+            goal["instruction"] = (
+                "TOOL-FIRST 工具优先：提交字段前，若 tools 中存在与脏字段"
+                "对应的归一化技能（normalize_*/correct_*），必须先调用该"
+                "技能取得输出，再以技能输出构造 fields 提交——禁止自行心算。"
+            )
         task = TaskSpec(
             id=f"crew_{inv.invoice_id}", kind="invoice_extract",
-            goal={"payload": payload}, input_schema={}, constraints={},
+            goal=goal, input_schema={}, constraints={},
             acceptance_criteria=[{"check": "fields_match"}],
         )
         states = await self._orchestrator.orchestrate(task, self._agents)
@@ -283,5 +299,8 @@ class InvoiceOpsCrew:
 
 def make_crew(
     env: CrewEnv, *, workspace: Path, memory=None,
+    tool_first: bool = False,
 ) -> InvoiceOpsCrew:
-    return InvoiceOpsCrew(env, workspace=workspace, memory=memory)
+    return InvoiceOpsCrew(
+        env, workspace=workspace, memory=memory, tool_first=tool_first,
+    )
