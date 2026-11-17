@@ -138,3 +138,52 @@ async def test_v16_realmodel_fixes_regression() -> None:
                   date="2026-10-18", tax_rate=0.06, category="hardware")
     result = await solve_invoice(env, inv, inv.model_dump())
     assert result.passed  # 正常路径不受容错层影响
+
+
+async def test_tool_first_goal_visible_to_model() -> None:
+    """V17 工具优先引导：goal 指令进 system prompt（真模型可见面）。"""
+    import tempfile
+    from pathlib import Path as P
+
+    from examples.crew.crew import make_crew
+    from examples.crew.learning import CrewMemory
+    from examples.crew.solver import make_solver_env
+
+    captured: dict = {}
+
+    class _CapturingVLM:
+        """捕获 ModelLoopPolicy 构造的 messages（不改行为）。"""
+
+        def capabilities(self):
+            from agent_core.models import Modality, ModelCapabilities
+
+            return ModelCapabilities(
+                model_id="cap", inputs={Modality.TEXT, Modality.IMAGE},
+            )
+
+        async def infer(self, request):
+            from agent_core.models import InferResponse
+
+            captured["messages"] = request.messages
+            captured["tools"] = request.tools
+            return InferResponse(text="done")
+
+    tmp = P(tempfile.mkdtemp())
+    env = make_solver_env(tmp, vlm=_CapturingVLM(), max_steps=1)
+    mem = CrewMemory(tmp / "m.db")
+    crew = make_crew(env, workspace=tmp / "ws", memory=mem, tool_first=True)
+
+    from examples.crew.domain import Invoice
+
+    inv = Invoice(invoice_id="tf", vendor="v", amount=1.0,
+                  date="2026-10-18", tax_rate=0.06, category="h")
+    try:
+        await crew._solve_one(inv, inv.model_dump())
+    except Exception:  # max_steps=1 预期失败——只验证 prompt
+        pass
+    system_text = " ".join(
+        str(m.get("content", "")) for m in captured.get("messages", [])
+        if m.get("role") == "system"
+    )
+    assert "工具优先" in system_text or "TOOL-FIRST" in system_text, \
+        f"tool_first 指令必须进 system prompt: {system_text[:120]}"
