@@ -54,12 +54,18 @@ async def main() -> int:
         waves = int(sys.argv[sys.argv.index("--waves") + 1])
     use_pipeline = "--pipeline" in sys.argv
     tool_first = "--tool-first" in sys.argv
+    probe = "--probe" in sys.argv  # V18 反饥饿探索（frontier+边界探针）
 
     # UserRoleGuard：qwen3.8 模板要求 user 角色（T4 实测 400 修复）
     vlm = UserRoleGuard(LMStudioVLM(VLM_MODEL))
     tmp = _BASE / "realrun_ws"
     tmp.mkdir(exist_ok=True)
-    mem = CrewMemory(tmp / "crew_mem.db")
+    # 跨 run 记忆清场：残 DB 会把上一 run 的规则带进对照（变量失控）
+    mem_db = tmp / "crew_mem.db"
+    mem_db.unlink(missing_ok=True)
+    for suffix in ("-wal", "-shm"):
+        Path(str(mem_db) + suffix).unlink(missing_ok=True)
+    mem = CrewMemory(mem_db)
     env = make_solver_env(
         tmp, memory=mem, vlm=vlm, max_steps=12,
     )
@@ -69,34 +75,42 @@ async def main() -> int:
 
     batch = _batch()
     print(f"[realrun] 27b={VLM_MODEL} waves={waves} "
-          f"pipeline={use_pipeline} tool_first={tool_first}")
+          f"pipeline={use_pipeline} tool_first={tool_first} probe={probe}")
     print(f"[realrun] batch={len(batch)} 票；ingest 学习/进化全链……")
 
     metrics = await crew.run_waves(
-        batch, n_waves=waves, pipeline=use_pipeline,
+        batch, n_waves=waves, pipeline=use_pipeline, probe=probe,
     )
+    rules = await mem.store.query("rules", {})
 
     lines = [
         "# crew 真实链路报告（27b）",
         "",
         f"- VLM: `{VLM_MODEL}`（reasoning_effort=low）",
         f"- waves: {waves}；pipeline: {use_pipeline}；"
-        f"tool_first: {tool_first}；批: {len(batch)} 票",
+        f"tool_first: {tool_first}；probe: {probe}；批: {len(batch)} 票",
+        f"- 记忆规则数（run 末）: {len(rules)}",
         "",
-        "| wave | 成功率 | 平均步数 | 被拒 | 技能 | 自愈 | 需复核 |",
-        "|---|---|---|---|---|---|---|",
+        "| wave | 成功率 | 平均步数 | 被拒 | 技能 | 自愈 | 需复核 "
+        "| 探针 | 探针失败 | 探针自愈 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in metrics:
+        probe_fail = sum(m.probe_failures_by_mode.values())
         lines.append(
             f"| {m.wave} | {m.success_rate:.2f} | {m.avg_steps:.1f} "
             f"| {m.total_rejected} | {m.skills} | {m.recovered} "
-            f"| {m.needs_review_count} |"
+            f"| {m.needs_review_count} | {m.probe_total} "
+            f"| {probe_fail}{m.probe_failures_by_mode or ''} "
+            f"| {m.probe_recovered} |"
         )
         print(
             f"[wave {m.wave}] rate={m.success_rate:.2f} "
             f"steps={m.avg_steps:.1f} rejected={m.total_rejected} "
-            f"skills={m.skills} recovered={m.recovered}"
+            f"skills={m.skills} recovered={m.recovered} "
+            f"probe={m.probe_total}/{probe_fail}/{m.probe_recovered}"
         )
+    print(f"[memory] rules={len(rules)}")
     report = _BASE / "realrun_crew_report.md"
     report.write_text("\n".join(lines) + "\n")
     print(f"[report] {report}")

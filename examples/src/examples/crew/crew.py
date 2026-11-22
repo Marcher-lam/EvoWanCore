@@ -27,6 +27,10 @@ class WaveMetrics:
     recovered: int = 0  # 当 wave 自愈数（进化后重派救回的失败票）
     total_rejected: int = 0  # 被拒提交总数（学习增益：弯路指标）
     needs_review_count: int = 0  # audit 打回数（合规复核——有消费的旗标）
+    # V18 探针指标（与 eval 批口径分离——探针不污染批指标）
+    probe_total: int = 0
+    probe_failures_by_mode: dict[str, int] = field(default_factory=dict)
+    probe_recovered: int = 0  # 进化后探针重派救回数（当 wave 闭环验证）
 
 
 def crew_agents() -> list:
@@ -64,6 +68,7 @@ class InvoiceOpsCrew:
         # 而绕过已进化技能（V16 realrun wave2/3 成功率回落根因）
         self._tool_first = tool_first
         self._evolved: set[str] = set()
+        self._probe_ids: set[str] = set()  # 探针票 id（跨 wave 去重）
         self._generation = 0
         self._agents = crew_agents()
         # V5 Orchestrator 原生同步策略（StaticPolicyAdapter 是给 async 版
@@ -76,12 +81,16 @@ class InvoiceOpsCrew:
     async def run_waves(
         self, batch: list[tuple[Invoice, dict]], *, n_waves: int = 3,
         pipeline: bool = False, curriculum: bool = False,
+        probe: bool = False,
     ) -> list[WaveMetrics]:
         """wave 循环（四能力全景入口）。
 
         pipeline=True：solve 走三阶段流水线（classify→extract→audit）；
         curriculum=True：批序列由 curriculum_batches 生成（难度递进），
-        传入的 batch 作为 wave1 起点 + gap_driven 扩充下轮。
+        传入的 batch 作为 wave1 起点 + gap_driven 扩充下轮；
+        probe=True：反饥饿探索（V18）——每 wave 批解算后主动合成难例
+        （frontier 未进化领地 + 已进化技能边界）试解，失败并流
+        反射器/进化器：批全过时学习不再断粮（"变强饿死学习"对策）。
         """
         metrics: list[WaveMetrics] = []
         batches = self._plan_batches(batch, n_waves, curriculum)
@@ -92,9 +101,15 @@ class InvoiceOpsCrew:
             m = self._metrics(w, results)
             # 指标先记（skills/成功率 = 初解面貌），进化后行
             if w < n_waves:  # 末 wave 不再进化（指标即战果）
-                await self._evolve_from(results)
-                await self._learn_from(results)  # B 闭环：规则记忆沉淀
+                probe_results = await self._run_probes(m) if probe else []
+                learn_from = list(results) + probe_results
+                await self._evolve_from(learn_from)
+                await self._learn_from(learn_from)  # B 闭环：规则记忆沉淀
                 m.recovered = await self._retry_failures(current, results)
+                if probe_results:
+                    m.probe_recovered = await self._retry_failures(
+                        self._last_probe_pairs, probe_results,
+                    )
                 # gap_driven：失败模式新票注入下轮（curriculum 模式）
                 if curriculum:
                     batches[w] = expand_with_gaps(
@@ -105,6 +120,33 @@ class InvoiceOpsCrew:
                         inv.invoice_id for inv, _ in batches[w])
             metrics.append(m)
         return metrics
+
+    async def _run_probes(self, m: WaveMetrics) -> list[SolveResult]:
+        """反饥饿探索：合成难例 → 试解 → 失败归因（合成真值标签）。
+
+        探针失败覆盖 grader 的字段级盲猜标签（大写金额会被误标成
+        currency_symbol——已进化模式，去重后零产出=饥饿第二形态）。
+        """
+        from examples.crew.probe import synthesize_probes
+
+        cases = synthesize_probes(
+            evolved=set(self._evolved), existing_ids=self._probe_ids,
+        )
+        self._last_probe_pairs = [(c.inv, c.payload) for c in cases]
+        probe_results: list[SolveResult] = []
+        for case in cases:
+            r = await self._solve_one(case.inv, case.payload)
+            if not r.passed:
+                r.error_tags = [case.mode]
+            probe_results.append(r)
+        m.probe_total = len(probe_results)
+        failures: dict[str, int] = {}
+        for r in probe_results:
+            if not r.passed:
+                for mode in r.error_tags:
+                    failures[mode] = failures.get(mode, 0) + 1
+        m.probe_failures_by_mode = failures
+        return probe_results
 
     def _plan_batches(
         self, batch: list[tuple[Invoice, dict]], n_waves: int,

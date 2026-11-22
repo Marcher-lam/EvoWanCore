@@ -19,6 +19,7 @@ SKILL_FOR_MODE = {
     "date_format": "normalize_date",
     "currency_symbol": "normalize_amount",
     "tax_rate": "correct_tax_rate",
+    "amount_words": "normalize_amount_words",
 }
 
 
@@ -26,7 +27,9 @@ def _dirty_modes(payload: dict) -> list[str]:
     modes = []
     if "/" in str(payload.get("date", "")):
         modes.append("date_format")
-    if isinstance(payload.get("amount"), str) or payload.get("amount_raw"):
+    if payload.get("amount_words_raw"):
+        modes.append("amount_words")
+    elif isinstance(payload.get("amount"), str) or payload.get("amount_raw"):
         modes.append("currency_symbol")
     if payload.get("tax_rate") == 0.03:
         modes.append("tax_rate")
@@ -191,6 +194,7 @@ class CrewFakeModel:
                         "date_format": "date",
                         "currency_symbol": "amount",
                         "tax_rate": "tax_rate",
+                        "amount_words": "amount",
                     }[m]
                     fields[key] = out["normalized"]
                 return _submit(fields)
@@ -221,6 +225,8 @@ def _dirty_value(payload: dict, mode: str) -> str:
         return str(payload.get("date", ""))
     if mode == "currency_symbol":
         return str(payload.get("amount_raw", ""))
+    if mode == "amount_words":
+        return str(payload.get("amount_words_raw", ""))
     return str(payload.get("tax_rate", ""))
 
 

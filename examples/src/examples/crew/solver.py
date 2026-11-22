@@ -196,6 +196,7 @@ def make_solver_env(
         # 技能动作：捕获沙箱真实 stdout（JSON）供 Fake 提交消费
         if request.capability_id in {
             "normalize_date", "normalize_amount", "correct_tax_rate",
+            "normalize_amount_words",
         } and result.status.value == "succeeded":
             out = result.output or {}
             if isinstance(out.get("normalized"), (str, int, float)):
