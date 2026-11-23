@@ -31,12 +31,17 @@ _RULE_TEXT = {
         "税率为 3% 的硬件采购票（口径错），必须先调用 correct_tax_rate "
         "校正为 6% 再提交字段"
     ),
+    "amount_words": (
+        "金额为大写中文（如 叁万捌仟伍佰元整）的票据，必须先调用 "
+        "normalize_amount_words 归一化再提交字段"
+    ),
 }
 
 _SKILL_IDS = {
     "date_format": "normalize_date",
     "currency_symbol": "normalize_amount",
     "tax_rate": "correct_tax_rate",
+    "amount_words": "normalize_amount_words",
 }
 
 # 祈使渲染需非空 params（平台 _render 契约）——占位引用票据字段
@@ -44,6 +49,7 @@ _SKILL_PARAMS = {
     "date_format": {"value": "payload.date"},
     "currency_symbol": {"value": "payload.amount_raw"},
     "tax_rate": {"value": "payload.tax_rate"},
+    "amount_words": {"value": "payload.amount_words_raw"},
 }
 
 # 复合脏的"全调指令"规则：多脏票据不得中途提交（学习增益的载体）

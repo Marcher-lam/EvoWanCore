@@ -31,7 +31,58 @@ def dirty_payload(inv: Invoice, mode: str) -> dict:
         # amount 本身变脏（带符号千分位串）——模型看到的才是真脏
         raw = f"￥{inv.amount:,.0f}"
         return inv.model_dump() | {"amount": raw, "amount_raw": raw}
+    if mode == "amount_words":
+        # 大写中文金额（发票标准写法）——prober 的 frontier 探针领域：
+        # eval 批分布之外，只有主动探索才会碰到（V18 反饥饿）
+        words = to_chinese_amount(inv.amount)
+        return inv.model_dump() | {
+            "amount": words, "amount_words_raw": words,
+        }
     raise ValueError(f"未知脏模式: {mode}")
+
+
+_CN_DIGITS = "零壹贰叁肆伍陆柒捌玖"
+_CN_UNITS = {1000: "仟", 100: "佰", 10: "拾", 1: ""}
+
+
+def _four_digits(v: int) -> str:
+    """0..9999 → 大写段（段内零补'零'，如 0205→零贰零伍 由调用侧拼）。"""
+    s = ""
+    zero_pending = False
+    for u in (1000, 100, 10, 1):
+        d = v // u % 10
+        if d:
+            if zero_pending:
+                s += "零"
+                zero_pending = False
+            s += _CN_DIGITS[d] + _CN_UNITS[u]
+        elif s:
+            zero_pending = True
+    return s
+
+
+def to_chinese_amount(amount: float) -> str:
+    """数值 → 大写中文金额（整数额度，拾亿内）——amount_words 的生成侧。
+
+    标准写法：高位段非零且低位段 0<rest<1000 时补段间零
+    （10005 → 壹万零伍，终评审 P2-1）。
+    """
+    n = int(amount)
+    if n == 0:
+        return "零元整"
+    parts: list[str] = []
+    wan, rest = divmod(n, 10000)
+    yi, wan = divmod(wan, 10000)
+    if yi:
+        parts.append(_four_digits(yi) + "亿")
+    if wan:
+        parts.append(_four_digits(wan) + "万")
+    if rest or not parts:
+        low = _four_digits(rest)
+        if parts and 0 < rest < 1000:
+            low = "零" + low
+        parts.append(low)
+    return "".join(parts) + "元整"
 
 
 def grader(

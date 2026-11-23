@@ -1,10 +1,10 @@
-# EvoWanCore 交接文档（V16 · 2026-11-17）
+# EvoWanCore 交接文档（V18 · 2026-11-23）
 
 > 进化式 Agent 系统：让系统学会它没学会的东西。
 > V1 内核闭环 → V2 学习/感知/MCP → V3 真 27b 北极星 → V4 extract 1.000 →
 > V5 生态层 → V6 推迟项 → V7 清债 → V8 非目标转正 → V9 backlog 清零 →
 > V10 工程面收口 → V11-12 多模态 RAG → V13 平台/应用分层 → V14-15 crew
-> 四能力 → V16 双应用全景。
+> 四能力 → V16 双应用全景 → V17 工具优先引导 → V18 反饥饿探索闭环。
 
 ## 0. 架构原则（V13 确立，最高优先级）
 
@@ -27,7 +27,7 @@ git grep 平台 7 路径，cwd 锚定 + rc 语义不空过）。
 | `agent-sdk-ts` | TypeScript 客户端 SDK（零运行时依赖；fetch DI + authToken + request() 通用消费） |
 | `examples/docworkbench` | **四能力全景应用**：北极星基准（真 27b explore/extract 1.000）+ V16 编排层（四维度选人/并行/重派/审计） |
 | `examples/mrag` | **多模态 RAG 应用**：页面图像 VLM 描述 + 向量检索 + 带引用生成；能力目录 + extra_routes 双形态暴露 |
-| `examples/crew` | **多 Agent 自进化团队应用**：探索(curriculum/gap/反例)+学习(B闭环祈使记忆)+编排(三阶段流水线)+进化(真门禁技能)；Fake 剧本测试 + 真模型入口 |
+| `examples/crew` | **多 Agent 自进化团队应用**：探索(curriculum/gap/反例/**prober 反饥饿**)+学习(B闭环祈使记忆)+编排(三阶段流水线)+进化(真门禁技能)；Fake 剧本测试 + 真模型入口 |
 | `tests_acceptance` | 验收套件（v2/v3/v5-v8 各一文件；v9-v16 追加） |
 
 ## 2. 协议实现对照（reserved.py 四桩全落地）
@@ -48,7 +48,7 @@ uv run ruff check .                    # lint
 uv run pytest -q                       # 全量 414+（零网络；LM Studio 仅实验脚本）
 cd agent-sdk-ts && npm ci && npx tsc -p tsconfig.json && node smoke/run.mjs
 uv run python -m examples.mrag.realrun --rebuild      # MRAG 真链路（27b+embedding）
-uv run python -m examples.crew.realrun_crew --waves 3 # crew 真模型全链（后台长跑）
+uv run python -m examples.crew.realrun_crew --waves 3 --tool-first --probe # crew 真模型全链（后台长跑，caffeinate 防休眠）
 ```
 
 CI：`.github/workflows/ci.yml`（python: ruff+pytest+chromium；ts: npm ci+tsc+smoke，
@@ -59,7 +59,7 @@ SHA pin/权限最小化/锁文件缓存）。发布：`release.yml`（手动；�
 | 应用 | 探索 | 学习 | 编排 | 进化 | 模型 |
 |---|---|---|---|---|---|
 | docworkbench | ✅ ExplorationController 全量 | ✅ 真 LLM reflector→审计→祈使记忆 | ✅ V16 编排层（四维度选人/并行/重派/审计） | ✅ DGM 真反射器 | ✅ 真 27b（1.000 基准，口径零改动） |
-| crew | ✅ curriculum/gap_driven/counterexample | ✅ B 闭环（稳定 id 规则+祈使渲染+学习增益可量化 0 拒） | ✅ 三阶段流水线（classify→extract→audit 打回） | ✅ 真门禁技能（多样本+反例合同锁边界作弊） | 真模型入口（UserRoleGuard+str 容错两缺陷修复；全量曲线 realrun） |
+| crew | ✅ curriculum/gap_driven/counterexample + **prober 反饥饿（frontier+边界探针）** | ✅ B 闭环（稳定 id 规则+祈使渲染+学习增益可量化 0 拒；探针持续供料） | ✅ 三阶段流水线（classify→extract→audit 打回） | ✅ 真门禁技能（多样本+反例合同锁边界作弊） | 真模型入口（UserRoleGuard+str 容错；V17 tool-first + V18 probe 全量曲线 realrun） |
 
 ## 5. 北极星与红线
 
@@ -77,6 +77,8 @@ SHA pin/权限最小化/锁文件缓存）。发布：`release.yml`（手动；�
 - [V14 crew](superpowers/plans/2026-11-16-evowancore-v14-crew.md)：门禁=contract_test（DualRunner 对 Fake 无意义）
 - [V15 crew 全景](superpowers/plans/2026-11-16-evowancore-v15-crew-full.md)：三角色共单 runtime 串行（并行需 task 键控）
 - [V16 双全景](superpowers/plans/2026-11-16-evowancore-v16-dual-full.md)：crew 真模型两怪癖（user-role 400 / str arguments）已修+回归锁定
+- [V17 工具优先](examples/src/examples/crew/realrun_crew_report.md)：goal 注入 TOOL-FIRST；发现"变强饿死学习"（批全过→反射器断粮）
+- [V18 反饥饿](superpowers/plans/2026-11-23-evowancore-v18-antistarve.md)：prober 主动合成难例（frontier amount_words+边界 counterexample 原串）持续供料反射器；探针失败按合成真值归因（grader 字段盲猜=饥饿第二形态）；真跑实证 rule_amount_words 为探针产物（批从未含该模式）。**终评审日志重放最大发现：平台 bridge 硬编码技能 schema=doc_id/dpi → 真 27b 按 schema 发参技能全灭（Fake 不看 schema 故测试全绿）——V16/V17 的"工具调用不稳"实为 schema 错配**；应用层零侵入修正+守卫测试（突变验证必红）。修复重跑：**0.83→1.00→1.00**（0.50 平台期消失，被拒 12→0，技能调用全程带 value）
 
 ## 7. 交接须知
 

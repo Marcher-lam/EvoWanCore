@@ -36,6 +36,13 @@ _COUNTEREXAMPLES: dict[str, dict[str, dict]] = {
         "ce_anything": {"args": {"value": "0.01"},
                         "expect_stdout_contains": '"normalized": 0.06'},
     },
+    # V18 frontier 反例：隐式壹（拾=10）与零额——锁住解析器边界作弊
+    "amount_words": {
+        "ce_ten": {"args": {"value": "拾元整"},
+                   "expect_stdout_contains": '"normalized": 10.0'},
+        "ce_zero": {"args": {"value": "零元整"},
+                    "expect_stdout_contains": '"normalized": 0.0'},
+    },
 }
 
 
