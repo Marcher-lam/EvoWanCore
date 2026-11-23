@@ -70,13 +70,21 @@ def frontier_probes(
     return out
 
 
-# 边界探针的 truth 构造：counterexample 值须从 truth 再生
-# （dirty_payload 的生成函数确定性地把 truth 变成边界脏值）
+# 边界探针：truth 构造 + counterexample 原串直写脏字段（终评审 P1-3：
+# 反例值必须是真的——由 truth 经 dirty_payload 再生会漂移成
+# "壹拾元整"/"2028/02/29"，与合同反例"拾元整"/"2028/2/29"不同串）
 _CE_TRUTH: dict[str, tuple[str | None, float | None]] = {
     "date_format": ("2028-02-29", None),  # ce_leap 闰年边界
     "currency_symbol": (None, 0.0),  # ce_zero 零额边界
-    "tax_rate": (None, None),  # ce_anything（truth 无特殊要求）
-    "amount_words": (None, 10.0),  # ce_ten 隐式壹边界（壹拾）
+    "tax_rate": (None, None),  # ce_anything（票面脏值仍 0.03）
+    "amount_words": (None, 10.0),  # ce_ten 隐式壹（拾=10）
+}
+_CE_PAYLOAD: dict[str, dict[str, str]] = {
+    # 合同反例原串 → 脏字段直写（票面出现的就是边界反例本身）
+    "date_format": {"date": "2028/2/29"},
+    "currency_symbol": {"amount": "￥0", "amount_raw": "￥0"},
+    "tax_rate": {},  # CE 实参是技能入参，票面脏值由 dirty_payload 生成
+    "amount_words": {"amount": "拾元整", "amount_words_raw": "拾元整"},
 }
 
 
@@ -87,6 +95,7 @@ def boundary_probes(
 
     每类每 wave 一票：技能在册后边界审计不中断——真模型世界里
     "技能存在但用不对"的失败（V17 wave3 currency 回落形态）由此浮出。
+    票面脏值 = 合同反例原串（非从 truth 再生的近似串）。
     """
     out: list[ProbeCase] = []
     for mode in sorted(evolved):
@@ -96,9 +105,8 @@ def boundary_probes(
             amount if amount is not None else 250.0,
             date=date or "2026-10-18",
         )
-        out.append(ProbeCase(
-            inv, dirty_payload(inv, mode), mode, "boundary",
-        ))
+        payload = dirty_payload(inv, mode) | _CE_PAYLOAD.get(mode, {})
+        out.append(ProbeCase(inv, payload, mode, "boundary"))
     return out
 
 

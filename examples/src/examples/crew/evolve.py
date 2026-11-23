@@ -41,7 +41,8 @@ _SKILL_SCRIPTS: dict[str, dict[str, str]] = {
             "print(json.dumps({'normalized': 0.06}))\n"
         ),
     },
-    # V18 frontier：大写中文金额解析（真解析器——万/亿分段 + 隐式壹 + 零额）
+    # V18 frontier：大写中文金额解析（真解析器——万/亿分段 + 隐式壹 + 零额；
+    # 终评审 P1-1 修复：亿+万复合不再重复乘累计 total；垃圾输入退出非零）
     "amount_words": {
         "main.py": (
             "import json, sys\n"
@@ -52,16 +53,22 @@ _SKILL_SCRIPTS: dict[str, dict[str, str]] = {
             " '陆': 6, '柒': 7, '捌': 8, '玖': 9}\n"
             "UNIT = {'拾': 10, '佰': 100, '仟': 1000}\n"
             "total = section = num = 0\n"
+            "seen = False\n"
             "for ch in s:\n"
             "    if ch in DIG:\n"
             "        num = DIG[ch]\n"
+            "        seen = True\n"
             "    elif ch in UNIT:\n"
             "        section += (num or 1) * UNIT[ch]\n"
             "        num = 0\n"
+            "        seen = True\n"
             "    elif ch in ('万', '亿'):\n"
-            "        total = (total + section + num) "
+            "        total = total + (section + num) "
             "* (10000 if ch == '万' else 100000000)\n"
             "        section = num = 0\n"
+            "        seen = True\n"
+            "if not seen:\n"
+            "    sys.exit(1)\n"
             "print(json.dumps({'normalized': float(total + section + num)}))\n"
         ),
     },
@@ -97,6 +104,9 @@ _SKILL_CONTRACTS: dict[str, dict] = {
                   "expect_stdout_contains": '"normalized": 205.0'},
         "case3": {"args": {"value": "拾贰元整"},
                   "expect_stdout_contains": '"normalized": 12.0'},
+        # 终评审 P1-2：锁亿+万复合（修复前该样本被真门禁拒绝）
+        "case4": {"args": {"value": "壹亿贰仟叁佰肆拾伍万元整"},
+                  "expect_stdout_contains": '"normalized": 123450000.0'},
     },
 }
 
@@ -149,7 +159,10 @@ async def register_skill_for_mode(
 
     # V17 真跑实测：tool-first 引导后 27b 真调技能——但平台 bridge 的
     # handler 不容错 str arguments（27b JSON 字符串怪癖全工具一致）。
-    # 应用层 rebind 包装（平台零侵入）：str → json.loads 后转调原 handler。
+    # V18 终评审日志重放：平台 bridge 还把 input_schema 硬编码成
+    # doc_id/dpi → 真 27b 按 advertised schema 发参，技能 120/120 全灭
+    # （Fake 不看 schema 故测试全绿——Fake-绿掩真-红的典型）。
+    # 应用层零侵入修正：重绑 schema 正确的描述符副本（含 str 容错）。
     inner = env.registry.handler_for(descriptor.id)
 
     async def _str_tolerant(args):
@@ -164,5 +177,8 @@ async def register_skill_for_mode(
                     return {"error": "malformed arguments"}
         return await inner(value)
 
+    descriptor = descriptor.model_copy(
+        update={"input_schema": {"value": "str"}},
+    )
     env.registry.rebind(descriptor, _str_tolerant)
     return True

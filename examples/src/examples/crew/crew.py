@@ -69,6 +69,7 @@ class InvoiceOpsCrew:
         self._tool_first = tool_first
         self._evolved: set[str] = set()
         self._probe_ids: set[str] = set()  # 探针票 id（跨 wave 去重）
+        self._last_probe_pairs: list[tuple[Invoice, dict]] = []
         self._generation = 0
         self._agents = crew_agents()
         # V5 Orchestrator 原生同步策略（StaticPolicyAdapter 是给 async 版
@@ -101,7 +102,10 @@ class InvoiceOpsCrew:
             m = self._metrics(w, results)
             # 指标先记（skills/成功率 = 初解面貌），进化后行
             if w < n_waves:  # 末 wave 不再进化（指标即战果）
-                probe_results = await self._run_probes(m) if probe else []
+                probe_results = (
+                    await self._run_probes(m, pipeline=pipeline)
+                    if probe else []
+                )
                 learn_from = list(results) + probe_results
                 await self._evolve_from(learn_from)
                 await self._learn_from(learn_from)  # B 闭环：规则记忆沉淀
@@ -121,11 +125,15 @@ class InvoiceOpsCrew:
             metrics.append(m)
         return metrics
 
-    async def _run_probes(self, m: WaveMetrics) -> list[SolveResult]:
+    async def _run_probes(
+        self, m: WaveMetrics, *, pipeline: bool = False,
+    ) -> list[SolveResult]:
         """反饥饿探索：合成难例 → 试解 → 失败归因（合成真值标签）。
 
         探针失败覆盖 grader 的字段级盲猜标签（大写金额会被误标成
         currency_symbol——已进化模式，去重后零产出=饥饿第二形态）。
+        探针与批票走同一条解算链（pipeline=True 时同样走三阶段——
+        终评审 P1-4：探针的"端到端"不得是另一条链）。
         """
         from examples.crew.probe import synthesize_probes
 
@@ -135,7 +143,10 @@ class InvoiceOpsCrew:
         self._last_probe_pairs = [(c.inv, c.payload) for c in cases]
         probe_results: list[SolveResult] = []
         for case in cases:
-            r = await self._solve_one(case.inv, case.payload)
+            r = (
+                await self.solve_pipeline(case.inv, case.payload)
+                if pipeline else await self._solve_one(case.inv, case.payload)
+            )
             if not r.passed:
                 r.error_tags = [case.mode]
             probe_results.append(r)
@@ -283,6 +294,7 @@ class InvoiceOpsCrew:
             passed=state == "succeeded" and self._env.last_pass,
             error_tags=list(self._env.last_errors),
             steps=self._env.dispatch_count,
+            rejected_submits=self._env.rejected_submits,
         )
 
     async def _retry_failures(

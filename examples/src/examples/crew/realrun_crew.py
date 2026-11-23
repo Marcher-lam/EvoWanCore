@@ -97,12 +97,15 @@ async def main() -> int:
     ]
     for m in metrics:
         probe_fail = sum(m.probe_failures_by_mode.values())
+        fail_detail = ",".join(
+            f"{k}×{v}" for k, v in sorted(m.probe_failures_by_mode.items())
+        )
+        fail_cell = f"{probe_fail}({fail_detail})" if fail_detail else "0"
         lines.append(
             f"| {m.wave} | {m.success_rate:.2f} | {m.avg_steps:.1f} "
             f"| {m.total_rejected} | {m.skills} | {m.recovered} "
             f"| {m.needs_review_count} | {m.probe_total} "
-            f"| {probe_fail}{m.probe_failures_by_mode or ''} "
-            f"| {m.probe_recovered} |"
+            f"| {fail_cell} | {m.probe_recovered} |"
         )
         print(
             f"[wave {m.wave}] rate={m.success_rate:.2f} "

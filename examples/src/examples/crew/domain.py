@@ -62,7 +62,11 @@ def _four_digits(v: int) -> str:
 
 
 def to_chinese_amount(amount: float) -> str:
-    """数值 → 大写中文金额（整数额度，拾亿内）——amount_words 的生成侧。"""
+    """数值 → 大写中文金额（整数额度，拾亿内）——amount_words 的生成侧。
+
+    标准写法：高位段非零且低位段 0<rest<1000 时补段间零
+    （10005 → 壹万零伍，终评审 P2-1）。
+    """
     n = int(amount)
     if n == 0:
         return "零元整"
@@ -74,7 +78,10 @@ def to_chinese_amount(amount: float) -> str:
     if wan:
         parts.append(_four_digits(wan) + "万")
     if rest or not parts:
-        parts.append(_four_digits(rest))
+        low = _four_digits(rest)
+        if parts and 0 < rest < 1000:
+            low = "零" + low
+        parts.append(low)
     return "".join(parts) + "元整"
 
 

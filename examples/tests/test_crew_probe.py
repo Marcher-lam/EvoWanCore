@@ -79,8 +79,8 @@ async def test_probe_feeds_learning_despite_full_batch_pass(
     assert "currency_symbol" not in w1.probe_failures_by_mode, (
         "大写金额失败不得误标为已进化的 currency_symbol（饥饿第二形态）"
     )
-    # 同 wave 自愈：进化出技能后探针重派救回
-    assert w1.probe_recovered >= 1, "进化后探针必须能救回（闭环验证）"
+    # 同 wave 自愈：进化出技能后探针重派救回（两张 frontier 探针都应救回）
+    assert w1.probe_recovered >= 2, "进化后探针必须能救回（闭环验证）"
 
     # wave2 起技能在册 + 规则沉淀（学习未断粮）
     assert metrics[1].skills >= 1
@@ -127,3 +127,79 @@ async def test_boundary_probes_audit_all_evolved_skills(
     # 批指标与非 probe 版语义一致：wave3 满分、技能 4 个
     assert metrics[2].success_rate == 1.0
     assert metrics[2].skills >= 4
+
+
+async def test_mixed_batch_starvation_control(tmp_path: Path) -> None:
+    """饥饿对照（变强形态，终评审 P2-3）：混合批无 probe → 学习停在 3。
+
+    与 test_boundary_probes_audit_all_evolved_skills（同批 +probe → 4）
+    构成受控对照：批全进化后无失败可学——amount_words 永远学不到，
+    除非探针主动供料（V17"变强饿死学习"的 Fake 复现）。
+    """
+    from examples.crew.crew import make_crew
+    from examples.crew.learning import CrewMemory
+    from examples.crew.solver import make_solver_env
+
+    batch = mixed_batch(
+        ["date_format", "currency_symbol", "tax_rate",
+         "date_format", None, "currency_symbol"],
+    )
+    mem = CrewMemory(tmp_path / "mem.db")
+    env = make_solver_env(tmp_path, memory=mem)
+    crew = make_crew(env, workspace=tmp_path / "ws", memory=mem)
+    metrics = await crew.run_waves(batch, n_waves=3)  # probe=False
+
+    assert metrics[2].skills == 3, "无 probe 时技能停在批内三模式"
+    records = await mem.store.query("rules", {})
+    assert all(r.id != "rule_amount_words" for r in records), (
+        "批分布外模式必须永远学不到——这正是饥饿；能学到即对照失效"
+    )
+
+
+async def test_amount_words_roundtrip_property(tmp_path: Path) -> None:
+    """解析器真工件 round-trip（终评审 P1-2）：生成器↔沙箱技能 120 样本。
+
+    覆盖亿+万复合（修复前 1807/6577 失败的数量级错）、段内零、段间零、
+    隐式壹、零额——经真沙箱执行（非二次实现自证）。
+    """
+    import json
+    import random
+
+    from agent_evolve.skill_sandbox import SkillSandbox
+    from examples.crew.domain import to_chinese_amount
+    from examples.crew.evolve import build_artifact
+
+    rng = random.Random(18)
+    samples = [0, 10, 205, 38500, 10005, 123450000, 100000001, 999999999]
+    samples += [rng.randrange(0, 10**9) for _ in range(112)]
+    sandbox = SkillSandbox(tmp_path / "ws", network="deny")
+    artifact = build_artifact("amount_words")
+    for n in samples:
+        words = to_chinese_amount(float(n))
+        result = await sandbox.run(artifact, {"value": words})
+        assert result.status == "succeeded", f"{n}({words}) 沙箱失败"
+        got = json.loads(result.stdout)["normalized"]
+        assert got == float(n), f"round-trip 破裂: {n}({words}) → {got}"
+
+
+async def test_evolved_skill_schema_advertises_value(tmp_path: Path) -> None:
+    """schema 守卫（终评审 P1-5）：技能 advertised schema 必须含 value。
+
+    平台 bridge 硬编码 doc_id/dpi → 真 27b 按 schema 发参全灭（V18
+    日志重放：149 次调用 0 次带 value）。应用层重绑副本修正——
+    本测试在修正缺失时必红（Fake 不看 schema，只有这里能拦）。
+    """
+    from examples.crew.evolve import register_skill_for_mode
+    from examples.crew.solver import make_solver_env
+
+    env = make_solver_env(tmp_path)
+    for mode in ("date_format", "currency_symbol", "amount_words"):
+        assert await register_skill_for_mode(
+            env, mode, workspace=tmp_path / "ws", generation=1,
+        )
+    for d in env.registry.discover({}):
+        if d.tags and "evolved" in d.tags:
+            assert "value" in d.input_schema, (
+                f"{d.id} advertised schema={d.input_schema} 缺 value——"
+                "真模型按 schema 发参将全灭"
+            )
