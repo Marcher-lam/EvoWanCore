@@ -78,7 +78,7 @@ SHA pin/权限最小化/锁文件缓存）。发布：`release.yml`（手动；�
 - [V15 crew 全景](superpowers/plans/2026-11-16-evowancore-v15-crew-full.md)：三角色共单 runtime 串行（并行需 task 键控）
 - [V16 双全景](superpowers/plans/2026-11-16-evowancore-v16-dual-full.md)：crew 真模型两怪癖（user-role 400 / str arguments）已修+回归锁定
 - [V17 工具优先](examples/src/examples/crew/realrun_crew_report.md)：goal 注入 TOOL-FIRST；发现"变强饿死学习"（批全过→反射器断粮）
-- [V18 反饥饿](superpowers/plans/2026-11-23-evowancore-v18-antistarve.md)：prober 主动合成难例（frontier amount_words+边界 counterexample 原串）持续供料反射器；探针失败按合成真值归因（grader 字段盲猜=饥饿第二形态）；真跑实证 rule_amount_words 为探针产物（批从未含该模式）。**终评审日志重放最大发现：平台 bridge 硬编码技能 schema=doc_id/dpi → 真 27b 按 schema 发参技能 120/120 全灭（Fake 不看 schema 故测试全绿）——V16/V17 的"工具调用不稳"实为 schema 错配**；应用层零侵入修正+守卫测试（突变验证必红）
+- [V18 反饥饿](superpowers/plans/2026-11-23-evowancore-v18-antistarve.md)：prober 主动合成难例（frontier amount_words+边界 counterexample 原串）持续供料反射器；探针失败按合成真值归因（grader 字段盲猜=饥饿第二形态）；真跑实证 rule_amount_words 为探针产物（批从未含该模式）。**终评审日志重放最大发现：平台 bridge 硬编码技能 schema=doc_id/dpi → 真 27b 按 schema 发参技能全灭（Fake 不看 schema 故测试全绿）——V16/V17 的"工具调用不稳"实为 schema 错配**；应用层零侵入修正+守卫测试（突变验证必红）。修复重跑：**0.83→1.00→1.00**（0.50 平台期消失，被拒 12→0，技能调用全程带 value）
 
 ## 7. 交接须知
 
